@@ -1,0 +1,35 @@
+{
+  "description": "BadmintonSim 真机内核自测：空白微信小游戏工程（说明见 README.md）。setting 关闭一切会改写或校验代码的选项，保证 sim.js 原样运行。",
+  "compileType": "game",
+  "appid": "touristappid",
+  "projectname": "badminton-wx-selftest",
+  "setting": {
+    "urlCheck": false,
+    "es6": false,
+    "enhance": false,
+    "postcss": false,
+    "minified": false,
+    "uglifyFileName": false,
+    "swc": false,
+    "disableSWC": true,
+    "ignoreUploadUnusedFiles": false,
+    "ignoreDevUnusedFiles": false,
+    "autoAudits": false,
+    "babelSetting": {
+      "ignore": ["sim.js"],
+      "disablePlugins": [],
+      "outputPath": ""
+    }
+  },
+  "packOptions": {
+    "ignore": [
+      { "type": "file", "value": "README.md" },
+      { "type": "suffix", "value": ".md" }
+    ],
+    "include": []
+  },
+  "editorSetting": {
+    "tabIndent": "insertSpaces",
+    "tabSize": 2
+  }
+}
