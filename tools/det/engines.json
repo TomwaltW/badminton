@@ -1,0 +1,57 @@
+{
+  "$comment": [
+    "确定性门禁的引擎清单（bun run det --kernel --profile <档>），说明见 tools/det/README.md。",
+    "cmd 一律绝对路径；开头的 ~/ 展开为主目录，展开后仍须是绝对路径；不以 - 开头的参数也按路径检查。",
+    "expect：arch = process.arch；version = 版本前缀（node 比 process.version，bun 比 process.versions.bun，jsc 比 Info.plist 的 CFBundleVersion；空串 = 只打印不判定）；jit = 必须开启 / 关闭。",
+    "mac 档 jsc-nojit 的 version 留空：首跑后把打印出的版本填进来。"
+  ],
+  "profiles": {
+    "linux": [
+      {
+        "name": "node",
+        "kind": "node",
+        "cmd": ["/opt/node22/bin/node"],
+        "expect": { "arch": "x64", "version": "v22." }
+      },
+      {
+        "name": "bun",
+        "kind": "bun",
+        "cmd": ["/root/.bun/bin/bun"],
+        "expect": { "arch": "x64", "version": "1.4.", "jit": true }
+      },
+      {
+        "name": "bun-nojit",
+        "kind": "bun",
+        "cmd": ["/root/.bun/bin/bun"],
+        "env": { "BUN_JSC_useJIT": "0" },
+        "expect": { "arch": "x64", "version": "1.4.", "jit": false }
+      }
+    ],
+    "mac": [
+      {
+        "name": "node-arm64",
+        "kind": "node",
+        "cmd": ["/usr/local/bin/node"],
+        "expect": { "arch": "arm64", "version": "v24." }
+      },
+      {
+        "name": "node-x64",
+        "kind": "node",
+        "cmd": ["/usr/bin/arch", "-x86_64", "/usr/local/bin/node"],
+        "expect": { "arch": "x64", "version": "v24." }
+      },
+      {
+        "name": "bun",
+        "kind": "bun",
+        "cmd": ["~/.bun/bin/bun"],
+        "expect": { "arch": "arm64", "version": "1.4.", "jit": true }
+      },
+      {
+        "name": "jsc-nojit",
+        "kind": "jsc",
+        "cmd": ["/System/Library/Frameworks/JavaScriptCore.framework/Versions/Current/Helpers/jsc", "--useJIT=false"],
+        "expect": { "version": "", "jit": false }
+      }
+    ]
+  }
+}
