@@ -1,0 +1,30 @@
+{
+  "name": "badminton",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "tools"
+  ],
+  "scripts": {
+    "postinstall": "bun tools/hooks/install.ts",
+    "gate": "bun tools/gate/gate.ts",
+    "merge": "bun tools/merge/merge.ts",
+    "det": "bun tools/det/det.ts",
+    "sim:build": "bun tools/sim/build.ts",
+    "sim:scan": "bun tools/sim/scan.ts",
+    "wx-selftest:sync": "bun tools/sim/sync-wx-selftest.ts",
+    "contracts:gen": "bun packages/contracts/scripts/gen-snapshot-offsets.ts",
+    "contracts:fixtures": "bun packages/contracts/scripts/gen-fixtures.ts",
+    "typecheck": "tsc -b",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/bun": "1.4.2",
+    "esbuild": "0.28.2",
+    "eslint": "10.12.0",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.1"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["ES2017"],
+    "types": [],
+    "rootDir": "src",
+    "outDir": "../../.tsbuild/contracts",
+    "tsBuildInfoFile": "../../.tsbuild/contracts.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"]
+}

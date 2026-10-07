@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["bun"],
+    "rootDir": ".",
+    "outDir": ".tsbuild/node",
+    "tsBuildInfoFile": ".tsbuild/node.tsbuildinfo"
+  },
+  "include": ["tools/**/*.ts", "packages/*/test/**/*.ts", "packages/*/scripts/**/*.ts"],
+  "exclude": ["**/node_modules/**", "**/dist/**"],
+  "references": [{ "path": "./packages/contracts" }, { "path": "./packages/sim" }]
+}

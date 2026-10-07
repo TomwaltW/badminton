@@ -8,3 +8,13 @@ client/temp/
 client/local/
 client/build/
 client/profiles/
+# 构建产物（由 bun run sim:build / tsc -b 生成）
+.tsbuild/
+packages/sim/dist/
+tools/wx-selftest/sim.js
+# 微信开发者工具在本机生成的私有配置（同名字段会覆盖 project.config.json，不提交）
+**/project.private.config.json
+# wx-selftest:sync 原子替换用的临时文件（只有进程被强杀时才会残留）
+tools/wx-selftest/.sim.js.sync-*.tmp
+# tsc -b 出错时可能把 .d.ts 写到源码旁边（例如工程引用被误删）；源码目录里不应有 .d.ts
+packages/*/src/**/*.d.ts

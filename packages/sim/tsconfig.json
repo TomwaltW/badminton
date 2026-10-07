@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "target": "ES2017",
+    "lib": ["ES2017"],
+    "types": [],
+    "rootDir": "src",
+    "outDir": "../../.tsbuild/sim",
+    "tsBuildInfoFile": "../../.tsbuild/sim.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "//references": "sim 用相对路径 '../../contracts/src/<模块>' 引用契约；引用工程的源码在 tsc -b 下映射到其 .d.ts 输出，不必列进本工程、也不受 rootDir 约束。",
+  "references": [{ "path": "../contracts" }]
+}

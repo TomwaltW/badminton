@@ -1,0 +1,19 @@
+#!/bin/sh
+# pre-commit 钩子（计划 4.2）：ESLint 禁令 + 暂存区的 sim:scan，检查的是暂存版本而不是工作树。
+# 由 bun install 的 postinstall（tools/hooks/install.ts）设置 git config core.hooksPath .githooks 启用；
+# 所有工作树共享这一设置，各自运行自己工作树里的 tools/hooks/pre-commit.ts。
+
+# 找 bun：先 PATH，再 $HOME/.bun/bin/bun（git 图形客户端等环境里 PATH 往往不含 ~/.bun/bin）。
+if command -v bun >/dev/null 2>&1; then
+  BUN=bun
+elif [ -n "$HOME" ] && [ -x "$HOME/.bun/bin/bun" ]; then
+  BUN="$HOME/.bun/bin/bun"
+else
+  echo "[pre-commit] 找不到 bun：PATH 里没有，\$HOME/.bun/bin/bun 也不存在。" >&2
+  echo "[pre-commit] 请先安装 bun（https://bun.sh），或把 bun 所在目录加进 PATH 后再提交。" >&2
+  exit 1
+fi
+
+# 钩子脚本位于 <工作树根>/.githooks/，据此定位工作树根（git 也会把当前目录设为工作树根）。
+ROOT=$(cd "$(dirname "$0")/.." && pwd) || exit 1
+exec "$BUN" "$ROOT/tools/hooks/pre-commit.ts"
