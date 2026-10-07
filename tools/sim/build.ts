@@ -71,6 +71,8 @@ export function emitDts(outFile: string): void {
     cwd: REPO_ROOT,
     encoding: 'utf8',
   });
+  // tsc 根本没能启动（找不到可执行文件等）时 stdout/stderr 是 null，原因只在 r.error 里
+  if (r.error) throw new Error(`无法运行 tsc（${TSC_BIN}）：${r.error.message}；先在仓库根 bun install`);
   if (r.status !== 0) throw new Error(`tsc 生成 sim.d.ts 失败：\n${r.stdout}${r.stderr}`);
   const raw = readFileSync(outFile, 'utf8');
   const names = new Set<string>();
