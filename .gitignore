@@ -1,0 +1,10 @@
+node_modules/
+.worktrees/
+.DS_Store
+*.log
+# Cocos 工程中不提交的目录
+client/library/
+client/temp/
+client/local/
+client/build/
+client/profiles/
