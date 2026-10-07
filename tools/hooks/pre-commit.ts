@@ -5,7 +5,7 @@
  *   1. 列出暂存的 .ts/.js/.mjs/.cjs（git diff --cached --name-only --diff-filter=ACMR）；没有就直接通过。
  *   2. ESLint Node API（new ESLint({ cwd: 仓库根 })）：被忽略的文件跳过，其余用 lintText(git show :路径, { filePath })
  *      检查暂存内容。只有错误（含解析失败）才拦，警告只打印。
- *   3. tools/sim/scan.ts 的 scanStaged(仓库根)：暂存区里的 packages/sim/src/**\/*.ts 与（若被暂存的）dist/sim.js。
+ *   3. tools/sim/scan.ts 的 scanStaged(仓库根)：暂存区里的 packages/sim/src/**\/*.ts、packages/contracts/src/**\/*.ts（会被打进 sim.js）与（若被暂存的）dist/sim.js。
  * 有错误或违规 → 打印并返回 1（git 中止提交）；否则 0。
  *
  * git 调用继承环境变量：git commit -a / git commit <路径> 时 git 用 GIT_INDEX_FILE 指向临时索引，必须读那一份。

@@ -39,10 +39,13 @@
 3. 禁用：
    - `Math.sqrt`——一律用 `dsqrt`（两者约 25% 的输入差 1 ulp，只能选一个）；
    - `Math.sin / cos / tan / exp / log / pow / hypot / atan2 / random` 及其他一切 `Math` 成员（超越函数在 V8 与 JSC、arm64 与 x64 之间不逐位一致，实测见计划 1.1）；
-   - `**`、`**=`（实现相关的 pow，用连乘）；
-   - `Date`、`performance` 等一切时钟；
-   - `eval`、`new Function`（微信也不支持）；
-   - 把 `Math` 起别名、传参、解构或以计算属性访问（`Math[name]`）。（ESLint、`sim:scan`）
+   - `**`、`**=`（实现相关的 pow，用连乘）（ESLint、`sim:scan`）；
+   - `Date`、`performance` 等一切时钟（ESLint 禁这两个全局名；`sim:scan` 只查 `Date`）；
+   - `eval`、`new Function`（微信也不支持）（ESLint）；
+   - 把 `Math` 起别名、传参、解构或以计算属性访问（`Math[name]`）（ESLint、`sim:scan`）；
+   - 名为 `Math` / `Date` 的成员访问与解构，不论对象是什么（`x.Math`、`x['Math']`、`x?.Date`、`const { Date: D } = x`、
+     `import D = x.Date`）：全局对象可以先起别名（`const root = …; root.Math.sin`）或包在条件 / 逻辑 / 逗号表达式里，
+     对象一侧无法静态判断，所以只看成员名；对全局对象做计算属性访问（`globalThis[k]`）。（ESLint、`sim:scan`）
 4. 需要角度、三角函数时：离线查表（`tools/tablegen`，表的生成器也用模拟核心自己的 RK4 与 `dsqrt`）或改写成向量代数，运行时不调超越函数。
 5. 固定运算顺序：同一个量在各处用同一段代码算（例如 RK4 的运算顺序与 `docs/spike/det-smoke.js` 逐项一致），不为"优化"重排浮点运算。
 
@@ -77,22 +80,30 @@
 1. 模拟核心只发布一个产物 `packages/sim/dist/sim.js`（IIFE、ES2017、不压缩，末尾显式挂到 `GameGlobal` / `globalThis`）；
    客户端插件脚本、服务端、门禁、`tools/wx-selftest` 都用它。不手改 `dist/`，不在别处直接引源码绕过它。
 2. `bun run sim:scan` 扫的是 `dist/sim.js`（与以后的构建产物），不是源码；ESLint 管源码。两道都要过。
+   （pre-commit 另用 `sim:scan --staged` 扫暂存区里的 `packages/sim/src/**/*.ts`、`packages/contracts/src/**/*.ts` 与 `dist/sim.js`。）
 3. `bun run det --kernel` 用 `dist/sim.js` 在一档引擎上**跨引擎互比、不存期望值**；改了模拟就先 `sim:build` 再 `det`。
 4. 不得为了变绿而放宽门禁：不改 ESLint 禁令、`sim:scan` 的允许清单、`tools/det/engines.json` 的期望，不在测试或门禁里写死哈希，
    不跳过测试。确需调整时写变更请求，由 INT 决定。
 
 ## 3. 模拟核心的边界
 
-1. `packages/sim` 零依赖：不引用 `cc`、`wx`、DOM、Node 内置模块（`fs`、`path` 等），只许相对路径导入；
-   从 `@badminton/contracts` 只许 `import type`。（ESLint）
-2. 不读写全局：`globalThis` / `GameGlobal` 只在 `src/index.ts` 末尾出现一次（挂 API）；不用 `console`、`setTimeout`、`process`。（ESLint）
-3. `packages/*/src` 不用 `enum` / `namespace`，类型一律 `import type`；导入不写 `.ts` 扩展名。（ESLint）
+1. `packages/sim` 零依赖：不引用 `cc`、`wx`、DOM、Node 内置模块（`fs`、`path` 等）与 npm 包，只许相对路径导入，
+   且只能留在本包内或指向 `packages/contracts/src`：契约的类型与运行时常量一律用相对路径 `../../contracts/src/<模块>`
+   导入，不用包名 `@badminton/contracts`（工作区未链接，`tsc` 与 `sim.d.ts` 都解析不了）；`packages/contracts/src`
+   同样只许相对路径，不得导入 `sim`；相对路径写成规范形式（不写 `./../`、`a/../`、`/./`、`//`）；不用动态 `import()`。（ESLint）
+2. 不读写全局：`globalThis` / `GameGlobal` 只在 `src/index.ts` 末尾出现一次（挂 API）；不用 `console`、`setTimeout`、`process`。
+   （ESLint：`index.ts` 以外禁这些全局名；`index.ts` 只放开 `globalThis` / `GameGlobal` 两个名字，其余禁令照样生效。
+   "只出现一次、在末尾"靠人工审查；用 `declare const GameGlobal` 之类声明同名绑定会遮蔽全局、让 ESLint 的全局名检查失效，
+   所以 `index.ts` 以外不写这类声明，也靠人工审查。）
+3. `packages/*/src` 不用 `enum` / `namespace`，类型导入一律带 `type`（`import type { X }` 或 `import { type X }`）；
+   导入不写 `.ts` 扩展名（含 `import type` 与 `export … from`）。（ESLint）
 4. `sim.js` 的 API 字段只增不删，改名视为契约变更（走 INT）。
 
 ## 4. 热路径不分配
 
 1. `step()` 以及名字以 **`step` / `cross` / `fnvMix` / `fnvHash` / `rngNext`** 开头的函数内，禁止 `new`、数组字面量、
-   对象字面量、闭包（函数表达式、箭头函数）、展开。（ESLint 强制）
+   对象字面量、闭包（函数表达式、箭头函数）、展开。（ESLint 强制；按名字识别函数声明、`const` 函数、对象方法、
+   类方法与类字段函数（`stepX = () => …`），方法本身不算闭包；`obj.stepX = function …` 这类赋值识别不到）
 2. 状态放预分配的 TypedArray，函数签名用"数组 + 偏移"传入传出；临时量用模块级的 scratch 数组，不在热路径里 `push` 增长数组。
 3. 新写的热路径函数按上面的前缀命名，让 ESLint 管得到；不要为绕过规则改名。
 
@@ -140,10 +151,10 @@
 | 命令 | 作用 |
 |---|---|
 | `bun install` | 安装依赖；postinstall 把 `core.hooksPath` 设为 `.githooks` |
-| `bun run gate [--profile linux\|mac]` | 门禁总入口：`tsc -b`、ESLint 禁令、`bun test`、`sim:build`、`sim:scan`、`det --kernel`；交付前必须退出 0 |
+| `bun run gate [--profile linux\|mac]` | 门禁总入口：`tsc -b --force`、ESLint 禁令、契约偏移（`contracts:gen --check`）、`bun test`（`CI=true`，禁 `.only`）、`sim:build`、`sim:scan`、`det --kernel`；交付前必须退出 0 |
 | `bun run det --kernel [--profile linux\|mac]` | 用 `dist/sim.js` 在一档引擎上跨引擎互比内核语料，不一致时打印首个分歧的语料号与 tick；`--fixture sin` 自测必须判红 |
 | `bun run sim:build` | 打包 `packages/sim/dist/sim.js` + `sim.d.ts` + `sim.version`（simVer = 文件字节的 FNV-1a） |
-| `bun run sim:scan [文件\|目录…]` | 扫构建产物里的禁用 API（默认 `dist/sim.js`）；`--staged` 扫暂存区（pre-commit 用） |
+| `bun run sim:scan [文件\|目录…]` | 扫构建产物里的禁用 API（默认 `dist/sim.js`）；`--staged` 扫暂存区里的 sim / contracts 源码与 `dist/sim.js`（pre-commit 用） |
 | `bun run merge <轨>` | **只由人运行**：gate → `merge --no-ff` → 主干 gate → 红了回退，回执写 `review/receipt-<轨>.md` |
 | `bun run wx-selftest:sync` | 把 `dist/sim.js` 复制进 `tools/wx-selftest` 并校验 simVer（真机内核自测，见该目录 README） |
 | `bun run contracts:gen [--check]` | 由 `snapshot.schema.ts` 生成快照命名偏移；`--check` 只比较 |

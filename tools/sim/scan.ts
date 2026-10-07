@@ -7,19 +7,25 @@
  *   （Math.random、Math.sqrt、Math.pow 与常量另有专门说明）；
  * - math-computed：Math[...] 计算属性访问（包括 Math['abs']，与 ESLint 禁令一致）；
  * - math-value：Math 不作为成员访问的对象出现（起别名、传参、const {sin} = Math、typeof Math、
- *   从对象里解构出名为 Math 的属性等）；
+ *   从对象里解构出名为 Math 的属性等），以及 x.Math / x['Math'] 后面不接禁用成员的情形（x.Math.floor、x.Math 本身）；
  * - pow / pow-assign：** 与 **=；
- * - date：Date 作为表达式被引用（Date.now()、new Date()、Date 本身、x instanceof Date）。
- *   x.Date 属性名、对象字面量键、类型位置不报。
+ * - date：Date 作为表达式被引用（Date.now()、new Date()、Date 本身、x instanceof Date），
+ *   以及名为 Date 的成员访问与解构（x.Date、x?.Date、x['Date']、const { Date: D } = x）。
+ *   对象字面量键、类成员声明、类型位置不报。
+ * - global-computed：对全局对象做非字面量的计算属性访问（globalThis[k]、(c ? GameGlobal : globalThis)[k]、
+ *   const { [k]: v } = globalThis）：成员名无法静态检查。
  * - parse：文件解析失败（扫不了的文件不能当作干净）。
- * 经由全局对象的访问（globalThis / self / window / global / GameGlobal、脚本顶层的 this 的
- * .Math、['Math']、.Date、['Date']）与直接写 Math、Date 同等对待。
+ * 名为 Math / Date 的成员访问（x.Math、x['Math']、x?.Date、import D = ns.Date）不论 x 是什么一律报：
+ * 全局对象可以先起别名（const root = …; root.Math.sin）或包在条件 / 逻辑 / 逗号表达式里，对象一侧无法静态判断。
+ * 全局对象指 globalThis / self / window / global / GameGlobal、脚本顶层的 this、它们彼此的成员（window.self），
+ * 以及条件 / 逻辑 / 逗号 / 赋值表达式包着的它们。
  * 遍历用显式栈，压缩产物里的超长逗号表达式不会爆栈。
  *
  * 用法：
  *   bun run sim:scan                  扫 packages/sim/dist/sim.js（不存在则提示先 bun run sim:build）
  *   bun run sim:scan <文件|目录> …     扫给定文件/目录（目录递归扫 .js/.cjs/.mjs/.ts，跳过 node_modules）
- *   bun run sim:scan --staged         扫 git 暂存区里的 packages/sim/src/**\/*.ts 与（若被暂存的）dist/sim.js
+ *   bun run sim:scan --staged         扫 git 暂存区里的 packages/sim/src/**\/*.ts、packages/contracts/src/**\/*.ts
+ *                                     （契约运行时代码会被打进 sim.js）与（若被暂存的）dist/sim.js
  * 有违规退出 1；参数错误退出 2。
  *
  * pre-commit 钩子直接 import 本文件的 scanStaged / formatViolation，导出的名字与签名不要改。
@@ -59,8 +65,8 @@ const GLOBAL_OBJECTS: ReadonlySet<string> = new Set(['globalThis', 'self', 'wind
 /** 目录递归扫描时收的扩展名。 */
 const SCAN_EXTS = ['.js', '.cjs', '.mjs', '.ts'];
 
-/** 暂存区扫描的范围：模拟核心源码与（若被暂存的）发布产物。 */
-const STAGED_SRC_PREFIX = 'packages/sim/src/';
+/** 暂存区扫描的范围：模拟核心与契约的源码（契约运行时代码会被打进 sim.js）、（若被暂存的）发布产物。 */
+const STAGED_SRC_PREFIXES = ['packages/sim/src/', 'packages/contracts/src/'] as const;
 const STAGED_DIST_JS = 'packages/sim/dist/sim.js';
 
 const ALLOWED_TEXT = [...MATH_ALLOWED].join('/');
@@ -79,6 +85,11 @@ const MSG_DESTRUCTURE = '禁止从对象里解构出 Math：只许 Math.<允许�
 const MSG_POW = '禁止 **（实现相关的 pow）：用连乘。';
 const MSG_POW_ASSIGN = '禁止 **=（实现相关的 pow）：用连乘。';
 const MSG_DATE = '禁止 Date：时钟不确定，模拟核心只用 tick 计时。';
+const MSG_MEMBER_MATH =
+  "模拟核心里不应有名为 Math 的成员访问（x.Math、x['Math']，不论 x 是什么）：x 可能是全局对象的别名；只许直接写 Math.<允许的函数>。";
+const MSG_MEMBER_DATE =
+  "模拟核心里不应有名为 Date 的成员访问或解构（x.Date、x['Date']、const { Date: D } = x，不论 x 是什么）：x 可能是全局对象的别名；时钟不确定，模拟核心只用 tick 计时。";
+const MSG_GLOBAL_COMPUTED = '禁止以非字面量的计算属性访问全局对象（globalThis[k] 等）：成员名无法静态检查。';
 
 /** 按扩展名选 ScriptKind；未知扩展名按 JS 解析（构建产物多半是 .js）。 */
 function scriptKindOf(fileName: string): ts.ScriptKind {
@@ -122,12 +133,19 @@ function outermost(node: ts.Expression): ts.Expression {
   return n;
 }
 
-/** 字面量形式的属性名（标识符、字符串、无替换模板、数字）；不是字面量返回 undefined。 */
+/** 字面量表达式（字符串、无替换模板、数字）的值；标识符等非字面量返回 undefined（obj[k] 的 k 不是名字）。 */
+function literalValue(node: ts.Expression): string | undefined {
+  const n = unwrap(node);
+  if (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n) || ts.isNumericLiteral(n)) return n.text;
+  return undefined;
+}
+
+/** 字面量形式的属性名（标识符、字符串、无替换模板、数字、[字面量]）；计算出来的名字返回 undefined。 */
 function literalName(node: ts.Node | undefined): string | undefined {
   if (!node) return undefined;
   if (ts.isIdentifier(node) || ts.isPrivateIdentifier(node)) return node.text;
   if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isNumericLiteral(node)) return node.text;
-  if (ts.isComputedPropertyName(node)) return literalName(unwrap(node.expression));
+  if (ts.isComputedPropertyName(node)) return literalValue(node.expression);
   return undefined;
 }
 
@@ -146,24 +164,58 @@ function isTopLevelThis(node: ts.Node): boolean {
   return true;
 }
 
-/** 表达式是否是全局对象：globalThis / self / window / global / GameGlobal、脚本顶层的 this，或它们彼此的成员（window.self …）。 */
+/**
+ * 表达式的值是否可能是全局对象：globalThis / self / window / global / GameGlobal、脚本顶层的 this、
+ * 它们彼此的成员（window.self …），以及包着它们的条件表达式（任一分支）、|| / ?? / ||= / ??=（任一侧）、
+ * && / &&=（右侧）、逗号与 =（右侧）。用显式栈，超长的 || 链不会爆栈。
+ */
 function isGlobalObject(expr: ts.Expression): boolean {
-  const n = unwrap(expr);
-  if (n.kind === ts.SyntaxKind.ThisKeyword) return isTopLevelThis(n);
-  if (ts.isIdentifier(n)) return GLOBAL_OBJECTS.has(n.text);
-  if (ts.isPropertyAccessExpression(n)) return GLOBAL_OBJECTS.has(n.name.text) && isGlobalObject(n.expression);
-  if (ts.isElementAccessExpression(n)) {
-    const name = literalName(n.argumentExpression);
-    return name !== undefined && GLOBAL_OBJECTS.has(name) && isGlobalObject(n.expression);
+  const todo: ts.Expression[] = [expr];
+  while (todo.length > 0) {
+    const n = unwrap(todo.pop()!);
+    if (n.kind === ts.SyntaxKind.ThisKeyword) {
+      if (isTopLevelThis(n)) return true;
+    } else if (ts.isIdentifier(n)) {
+      if (GLOBAL_OBJECTS.has(n.text)) return true;
+    } else if (ts.isPropertyAccessExpression(n)) {
+      if (GLOBAL_OBJECTS.has(n.name.text)) todo.push(n.expression);
+    } else if (ts.isElementAccessExpression(n)) {
+      const name = literalValue(n.argumentExpression);
+      if (name !== undefined && GLOBAL_OBJECTS.has(name)) todo.push(n.expression);
+    } else if (ts.isConditionalExpression(n)) {
+      todo.push(n.whenTrue, n.whenFalse);
+    } else if (ts.isBinaryExpression(n)) {
+      switch (n.operatorToken.kind) {
+        case ts.SyntaxKind.BarBarToken:
+        case ts.SyntaxKind.QuestionQuestionToken:
+        case ts.SyntaxKind.BarBarEqualsToken:
+        case ts.SyntaxKind.QuestionQuestionEqualsToken:
+          todo.push(n.left, n.right);
+          break;
+        case ts.SyntaxKind.AmpersandAmpersandToken:
+        case ts.SyntaxKind.AmpersandAmpersandEqualsToken:
+        case ts.SyntaxKind.CommaToken:
+        case ts.SyntaxKind.EqualsToken:
+          todo.push(n.right);
+          break;
+        default:
+          break;
+      }
+    }
   }
   return false;
 }
 
-/** 经由全局对象访问的全局名：globalThis.Math → 'Math'，self['Date'] → 'Date'；否则 undefined。 */
-function globalMemberName(node: ts.Node): string | undefined {
-  if (ts.isPropertyAccessExpression(node) && isGlobalObject(node.expression)) return node.name.text;
-  if (ts.isElementAccessExpression(node) && isGlobalObject(node.expression)) return literalName(node.argumentExpression);
-  return undefined;
+/** 成员访问的成员名：x.name → 'name'，x['name'] → 'name'；计算出来的名字返回 undefined。 */
+function memberName(node: ts.PropertyAccessExpression | ts.ElementAccessExpression): string | undefined {
+  return ts.isPropertyAccessExpression(node) ? node.name.text : literalValue(node.argumentExpression);
+}
+
+/** QualifiedName 是否在一条会编译成运行时代码的 import X = a.b 里（import type X = … 不算）。 */
+function inValueImportEquals(node: ts.QualifiedName): boolean {
+  let n: ts.Node = node;
+  while (ts.isQualifiedName(n.parent)) n = n.parent;
+  return ts.isImportEqualsDeclaration(n.parent) && !n.parent.isTypeOnly && n.parent.moduleReference === n;
 }
 
 /**
@@ -302,26 +354,36 @@ export function scanSource(text: string, fileName: string): Violation[] {
     });
   }
 
-  /** node 是一个 Math 引用（Math 标识符或 globalThis.Math 之类）：按它出现的位置判 member / computed / value。 */
-  const checkMathRef = (node: ts.Expression): void => {
+  /**
+   * node 是一个 Math 引用（Math 标识符，或 x.Math、x['Math'] 这类名为 Math 的成员访问）：按它出现的位置判
+   * member / computed / value。viaMember：经由成员访问拿到的 Math，即使后面是允许清单里的函数也报。
+   */
+  const checkMathRef = (node: ts.Expression, viaMember: boolean): void => {
     const outer = outermost(node);
     const p = outer.parent;
     if (ts.isPropertyAccessExpression(p) && p.expression === outer) {
       const name = p.name.text;
       if (!MATH_ALLOWED.has(name)) report(node, 'math-member', mathMemberMessage(name));
+      else if (viaMember) report(node, 'math-value', MSG_MEMBER_MATH);
     } else if (ts.isElementAccessExpression(p) && p.expression === outer) {
-      const name = literalName(p.argumentExpression);
+      const name = literalValue(p.argumentExpression);
       report(node, 'math-computed', name === undefined ? MSG_COMPUTED : `${MSG_COMPUTED}（Math['${name}']）`);
     } else {
-      report(node, 'math-value', MSG_VALUE);
+      report(node, 'math-value', viaMember ? MSG_MEMBER_MATH : MSG_VALUE);
     }
   };
 
-  /** 解构出名为 Math / Date 的属性：Math 一律报；Date 只在来源是全局对象时报（x.Date 是普通属性名）。 */
+  /**
+   * 解构出的属性：名为 Math / Date 的不论来源一律报（来源可能是全局对象的别名）；
+   * 计算出来的键（{ [k]: v }）在来源是全局对象时报 global-computed。
+   */
   const checkDestructuredKey = (keyNode: ts.Node, pattern: ts.Node): void => {
     const key = literalName(keyNode);
     if (key === 'Math') report(keyNode, 'math-value', MSG_DESTRUCTURE);
-    else if (key === 'Date' && patternFromGlobal(pattern)) report(keyNode, 'date', MSG_DATE);
+    else if (key === 'Date') report(keyNode, 'date', MSG_MEMBER_DATE);
+    else if (key === undefined && ts.isComputedPropertyName(keyNode) && patternFromGlobal(pattern)) {
+      report(keyNode, 'global-computed', MSG_GLOBAL_COMPUTED);
+    }
   };
 
   // 用显式栈遍历而不是递归：压缩产物里上万项的逗号表达式 / 连加是左深树，递归会爆栈。
@@ -346,16 +408,26 @@ export function scanSource(text: string, fileName: string): Violation[] {
 
     if (ts.isIdentifier(node)) {
       if ((node.text === 'Math' || node.text === 'Date') && isReferenceIdentifier(node)) {
-        if (node.text === 'Math') checkMathRef(node);
+        if (node.text === 'Math') checkMathRef(node, false);
         else report(node, 'date', MSG_DATE);
       }
       continue;
     }
 
     if (ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) {
-      const g = globalMemberName(node);
-      if (g === 'Math') checkMathRef(node);
-      else if (g === 'Date') report(node, 'date', MSG_DATE);
+      // 名为 Math / Date 的成员访问不论对象一律报；对全局对象的非字面量计算属性访问报 global-computed。
+      const name = memberName(node);
+      if (name === 'Math') checkMathRef(node, true);
+      else if (name === 'Date') report(node, 'date', MSG_MEMBER_DATE);
+      else if (name === undefined && ts.isElementAccessExpression(node) && isGlobalObject(node.expression)) {
+        report(node, 'global-computed', MSG_GLOBAL_COMPUTED);
+      }
+    } else if (ts.isQualifiedName(node)) {
+      // import D = ns.Date / import M = ns.Math：esbuild 编成 var D = ns.Date（类型位置的 QualifiedName 已整棵跳过）
+      if ((node.right.text === 'Math' || node.right.text === 'Date') && inValueImportEquals(node)) {
+        if (node.right.text === 'Math') report(node, 'math-value', MSG_MEMBER_MATH);
+        else report(node, 'date', MSG_MEMBER_DATE);
+      }
     } else if (ts.isBinaryExpression(node)) {
       if (node.operatorToken.kind === ts.SyntaxKind.AsteriskAsteriskToken) report(node.operatorToken, 'pow', MSG_POW);
       else if (node.operatorToken.kind === ts.SyntaxKind.AsteriskAsteriskEqualsToken) {
@@ -422,13 +494,14 @@ function git(repoRoot: string, args: string[]): Buffer {
 
 /** 暂存区里是否属于扫描范围。 */
 function isStagedTarget(path: string): boolean {
-  return (path.startsWith(STAGED_SRC_PREFIX) && path.endsWith('.ts')) || path === STAGED_DIST_JS;
+  return (STAGED_SRC_PREFIXES.some((prefix) => path.startsWith(prefix)) && path.endsWith('.ts')) || path === STAGED_DIST_JS;
 }
 
 /**
  * 扫 git 暂存区（索引）里的内容，而不是工作树：只 git add 了一半的文件按暂存的那一半判。
- * 范围：git diff --cached --name-only --diff-filter=ACMR -z 列出的 packages/sim/src/**\/*.ts，
- * 以及（若被暂存的）packages/sim/dist/sim.js。Violation.file 是仓库内的相对路径。
+ * 范围：git diff --cached --name-only --diff-filter=ACMR -z 列出的 packages/sim/src/**\/*.ts、
+ * packages/contracts/src/**\/*.ts（契约运行时代码会被打进 sim.js），以及（若被暂存的）packages/sim/dist/sim.js。
+ * Violation.file 是仓库内的相对路径。
  */
 export function scanStaged(repoRoot: string): { files: number; violations: Violation[] } {
   const listed = git(repoRoot, ['diff', '--cached', '--name-only', '--diff-filter=ACMR', '-z'])

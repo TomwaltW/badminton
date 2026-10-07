@@ -1,6 +1,8 @@
 /**
  * sim:scan 的测试：每条规则一个正例一个反例；注释、字符串、模板字符串不误报；允许清单全部放行；
- * TS 与 JS 都测；真实构建的 sim.js 扫描 0 违规；scanStaged 扫的是 git 索引而不是工作树；
+ * 名为 Math / Date 的成员访问不论对象一律报（全局对象的别名、条件 / 逻辑 / 逗号表达式绕不过去）；
+ * 对全局对象的非字面量计算属性访问报 global-computed；
+ * TS 与 JS 都测；真实构建的 sim.js 扫描 0 违规；scanStaged 扫的是 git 索引而不是工作树（含 contracts/src）；
  * 超深语法树不爆栈；CLI 的输出与退出码。
  */
 import { afterAll, describe, expect, test } from 'bun:test';
@@ -85,11 +87,11 @@ describe('math-member', () => {
     const code = [...MATH_ALLOWED].map((n, i) => `const v${i} = Math.${n}(1, 2);`).join('\n');
     expect(MATH_ALLOWED.size).toBe(10);
     expect(rulesBoth(code)).toEqual([]);
-    expect(rulesBoth('const m = Math.max.apply(null, [1, 2]); const g = globalThis.Math.imul(3, 5);')).toEqual([]);
+    expect(rulesBoth('const m = Math.max.apply(null, [1, 2]);')).toEqual([]);
   });
 
-  test('反例：别的对象上的同名成员不报', () => {
-    expect(rulesBoth('const y = obj.sin(1) + obj.Math.sin(2) + x.y.Math.sin(3);')).toEqual([]);
+  test('反例：别的对象上的同名函数（obj.sin）不报', () => {
+    expect(rulesBoth('const y = obj.sin(1) + obj.math.sin(2) + x.y.sqrt(3);')).toEqual([]);
   });
 
   test('正例：脚本顶层的 this（含顶层箭头函数里的 this）就是全局对象', () => {
@@ -102,13 +104,83 @@ describe('math-member', () => {
     expect(rulesBoth('const o = { [this.Math]: 1 };')).toEqual(['math-value']);
   });
 
-  test('反例：函数、方法、类字段、静态块里的 this 不当作全局对象', () => {
+  test('反例：函数、方法、类字段、静态块里的 this 不当作全局对象（this[k] 不报 global-computed）', () => {
     const code = [
-      'function f(a = this.Math) { return this.Math.sin(1); }',
-      'const o = { m() { return this.Date.now(); } };',
-      'class K { x = this.Math; static s = this.Date; static { this.Math.sin(1); } m() { return () => this.Math; } }',
+      'function f(a = this[k]) { return this[k](1); }',
+      'const o = { m() { return this[k]; } };',
+      'class K { x = this[k]; static s = this[k]; static { this[k](1); } m() { return () => this[k]; } }',
     ].join('\n');
     expect(rulesBoth(code)).toEqual([]);
+    // 对照：同样的写法放在脚本顶层就是全局对象的计算属性访问
+    expect(rulesBoth('const v = this[k]; const f = () => this[k];')).toEqual(['global-computed', 'global-computed']);
+  });
+});
+
+describe('名为 Math / Date 的成员访问：不论对象是什么一律报', () => {
+  test('正例：全局对象包在条件 / 逻辑 / 逗号表达式里、或先起别名', () => {
+    expect(rulesBoth("(typeof GameGlobal !== 'undefined' ? GameGlobal : globalThis).Math.log(2);")).toEqual(['math-member']);
+    expect(
+      rulesBoth("const root = typeof GameGlobal !== 'undefined' ? GameGlobal : globalThis; root.Math.sin(root.Date.now());"),
+    ).toEqual(['math-member', 'date']);
+    expect(rulesBoth('(GameGlobal || globalThis).Date.now();')).toEqual(['date']);
+    expect(rulesBoth('(GameGlobal ?? globalThis).Math.random();')).toEqual(['math-member']);
+    expect(rulesBoth('(0, globalThis).Math.cos(1);')).toEqual(['math-member']);
+    expect(rules('(root as typeof globalThis).Math.exp(1);', 'a.ts')).toEqual(['math-member']);
+  });
+
+  test('正例：任意对象上的 .Math / [\'Math\'] / ?.Date / [`Date`]，允许清单里的成员也报', () => {
+    expect(rulesBoth('const y = obj.Math.sin(2) + x.y.Math.sin(3);')).toEqual(['math-member', 'math-member']);
+    expect(rulesBoth('const y = obj.Math.floor(2);')).toEqual(['math-value']);
+    expect(rulesBoth('const g = globalThis.Math.imul(3, 5);')).toEqual(['math-value']);
+    expect(rulesBoth("const m = obj['Math'];")).toEqual(['math-value']);
+    expect(rulesBoth('const m = obj?.Math;')).toEqual(['math-value']);
+    expect(rulesBoth('const d = obj?.Date;')).toEqual(['date']);
+    expect(rulesBoth('const d = obj[`Date`].now();')).toEqual(['date']);
+    expect(rulesBoth('function f() { return this.Math.sin(1) + this.Date.now(); }')).toEqual(['math-member', 'date']);
+  });
+
+  test('说明里写明"不应有名为 Math / Date 的成员访问"', () => {
+    const [m] = scanSource('const y = obj.Math.floor(2);', 'a.js');
+    const [d] = scanSource('const t = root.Date.now();', 'a.js');
+    expect(m?.message).toContain('不应有名为 Math 的成员访问');
+    expect(d?.message).toContain('不应有名为 Date 的成员访问');
+  });
+
+  test('正例：从任意对象解构出 Date（Math 本来就报）', () => {
+    expect(rulesBoth('const { Date: D } = root;')).toEqual(['date']);
+    expect(rulesBoth("const { 'Date': D } = cond ? self : globalThis;")).toEqual(['date']);
+    expect(rulesBoth('let D; ({ Date: D } = root);')).toEqual(['date']);
+  });
+
+  test('反例：对象字面量键、类成员声明、方法名不是成员访问', () => {
+    expect(rulesBoth('const o = { Math: 1, Date: 2 }; class C { Math = 1; Date() { return 1; } }')).toEqual([]);
+  });
+
+  test('正例：import D = ns.Date（esbuild 编成 var D = ns.Date）；import type 不报', () => {
+    expect(rules('import D = ns.Date;', 'a.ts')).toEqual(['date']);
+    expect(rules('import M = ns.Math;', 'a.ts')).toEqual(['math-value']);
+    expect(rules('import type D = ns.Date;', 'a.ts')).toEqual([]);
+  });
+});
+
+describe('global-computed：对全局对象做非字面量的计算属性访问', () => {
+  test('正例：globalThis[k]、条件 / 逻辑 / 逗号表达式包着的全局对象、拼接出来的名字、计算键解构', () => {
+    expect(rulesBoth('const v = globalThis[k];')).toEqual(['global-computed']);
+    expect(rulesBoth("const v = (typeof GameGlobal !== 'undefined' ? GameGlobal : globalThis)[k];")).toEqual(['global-computed']);
+    expect(rulesBoth("const v = (GameGlobal || globalThis)['Ma' + 'th'].sin(1);")).toEqual(['global-computed']);
+    expect(rulesBoth('const v = (0, self)[k];')).toEqual(['global-computed']);
+    expect(rulesBoth('const v = (cond ? window : x)[k];')).toEqual(['global-computed']);
+    expect(rulesBoth('const { [k]: v } = globalThis;')).toEqual(['global-computed']);
+  });
+
+  test('反例：字面量下标、普通对象的计算属性、入口的全局赋值', () => {
+    expect(rulesBoth("globalThis['BadmintonSim'] = api; const v = arr[i] + obj[k] + (a || b)[k];")).toEqual([]);
+    expect(rulesBoth("(typeof GameGlobal !== 'undefined' ? GameGlobal : globalThis).BadmintonSim = api;")).toEqual([]);
+    expect(rulesBoth('const { [k]: v } = obj;')).toEqual([]);
+  });
+
+  test('说明', () => {
+    expect(scanSource('globalThis[k];', 'a.js')[0]?.message).toContain('全局对象');
   });
 });
 
@@ -146,8 +218,8 @@ describe('math-value', () => {
     expect(rulesBoth('function f({ Math: M }) { return M; }')).toEqual(['math-value']);
   });
 
-  test('反例：属性名、对象字面量键、方法名、标签、类型位置', () => {
-    expect(rulesBoth('const a = x.Math; const b = { Math: 1 }; class C { Math() { return 1; } }')).toEqual([]);
+  test('反例：对象字面量键、方法名、标签、类型位置', () => {
+    expect(rulesBoth('const b = { Math: 1 }; class C { Math() { return 1; } }')).toEqual([]);
     expect(rulesBoth('Math: for (;;) { break Math; }')).toEqual([]);
     expect(rules('let t: typeof Math; type S = typeof Math.sin; interface I { Math: Math }', 'a.ts')).toEqual([]);
     expect(rules('function f(m: Math): Math { return m; }', 'a.ts')).toEqual([]);
@@ -218,12 +290,14 @@ describe('date', () => {
     expect(rulesBoth('let D; ({ self: { Date: D } } = globalThis);')).toEqual(['date']);
   });
 
-  test('反例：x.Date 属性名、对象字面量键、类成员、非全局对象的解构', () => {
-    expect(
-      rulesBoth('const a = x.Date; const b = x.Date.now(); const c = { Date: 1 }; class C { Date() { return 1; } }'),
-    ).toEqual([]);
-    expect(rulesBoth('const { Date: d } = record;')).toEqual([]);
-    expect(rulesBoth('const { record: { Date: d } } = globalThis; let e; [{ Date: e }] = [record];')).toEqual([]);
+  test('正例：x.Date 与从任意对象解构 Date 也报（x 可能是全局对象的别名）', () => {
+    expect(rulesBoth('const a = x.Date; const b = x.Date.now();')).toEqual(['date', 'date']);
+    expect(rulesBoth('const { Date: d } = record;')).toEqual(['date']);
+    expect(rulesBoth('const { record: { Date: d } } = globalThis; let e; [{ Date: e }] = [record];')).toEqual(['date', 'date']);
+  });
+
+  test('反例：对象字面量键、类成员', () => {
+    expect(rulesBoth('const c = { Date: 1 }; class C { Date() { return 1; } }')).toEqual([]);
   });
 
   test('反例：类型位置（注解、as、泛型实参、implements）', () => {
@@ -414,6 +488,24 @@ describe('构建产物', () => {
     const s = scanFiles([r.jsPath]);
     expect(s.violations.map((v) => v.rule).sort()).toEqual(['date', 'math-member', 'math-member', 'math-member', 'pow']);
   });
+
+  test('对照：入口经由全局对象的别名 / 条件表达式取 Math、Date（tsc、ESLint 旧规则都放过），打包后被抓到', async () => {
+    const dir = tmp('alias');
+    const entry = join(dir, 'index.ts');
+    writeFileSync(
+      entry,
+      [
+        'declare const GameGlobal: typeof globalThis;',
+        "const root = typeof GameGlobal !== 'undefined' ? GameGlobal : globalThis;",
+        "const api = { t: root.Math.sin(root.Date.now()), l: (typeof GameGlobal !== 'undefined' ? GameGlobal : globalThis).Math.log(2) };",
+        "(typeof GameGlobal !== 'undefined' ? GameGlobal : globalThis as any).BadmintonSim = api;",
+        '',
+      ].join('\n'),
+    );
+    const r = await buildSim({ entry, outDir: join(dir, 'out'), dts: false });
+    const s = scanFiles([r.jsPath]);
+    expect(s.violations.map((v) => v.rule).sort()).toEqual(['date', 'math-member', 'math-member']);
+  });
 });
 
 // ---------------------------------------------------------------- scanStaged
@@ -502,7 +594,7 @@ describe.skipIf(!GIT)('scanStaged（临时 git 仓库）', () => {
     expect(r.violations).toEqual([]);
   });
 
-  test('范围：packages/sim/src/**/*.ts 与被暂存的 dist/sim.js；其他路径不扫', () => {
+  test('范围：packages/sim/src/**/*.ts、packages/contracts/src/**/*.ts 与被暂存的 dist/sim.js；其他路径不扫', () => {
     const repo = tmp('git-scope');
     git(repo, 'init', '-q', '-b', 'main');
     const files: Record<string, string> = {
@@ -511,6 +603,10 @@ describe.skipIf(!GIT)('scanStaged（临时 git 仓库）', () => {
       'packages/sim/dist/sim.js': '(() => { globalThis.BadmintonSim = { p: 2 ** 3 }; })();\n',
       'packages/sim/test/t.test.ts': 'Math.sin(1);\n',
       'packages/contracts/src/c.ts': 'export const c = Math.cos(1);\n',
+      'packages/contracts/src/gen/g.ts': 'export const g = 2 ** 3;\n',
+      'packages/contracts/src/README.md': 'Math.sin(1)\n',
+      'packages/contracts/scripts/s.ts': 'Math.sin(1);\n',
+      'packages/contracts/test/t.test.ts': 'Math.sin(1);\n',
       'tools/x.ts': 'Math.random();\n',
     };
     for (const [p, text] of Object.entries(files)) {
@@ -519,11 +615,24 @@ describe.skipIf(!GIT)('scanStaged（临时 git 仓库）', () => {
     }
     git(repo, 'add', '-A');
     const r = stagedClean(repo);
-    expect(r.files).toBe(2);
+    expect(r.files).toBe(4);
     expect(r.violations.map((v) => [v.file, v.rule])).toEqual([
+      ['packages/contracts/src/c.ts', 'math-member'],
+      ['packages/contracts/src/gen/g.ts', 'pow'],
       ['packages/sim/dist/sim.js', 'pow'],
       ['packages/sim/src/deep/er/a.ts', 'date'],
     ]);
+  });
+
+  test('契约运行时代码会被打进 sim.js：暂存的 packages/contracts/src/*.ts 照样拦', () => {
+    const repo = tmp('git-contracts');
+    git(repo, 'init', '-q', '-b', 'main');
+    mkdirSync(join(repo, 'packages/contracts/src'), { recursive: true });
+    writeFileSync(join(repo, 'packages/contracts/src/replay.ts'), 'export const stamp = (): number => Date.now();\n');
+    git(repo, 'add', '-A');
+    const r = stagedClean(repo);
+    expect(r.files).toBe(1);
+    expect(r.violations.map((v) => [v.file, v.line, v.rule])).toEqual([['packages/contracts/src/replay.ts', 1, 'date']]);
   });
 
   test('继承 GIT_INDEX_FILE：pre-commit 用临时索引（git commit -a / git commit <路径>）时扫的是那份索引', () => {
