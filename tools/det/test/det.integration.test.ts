@@ -65,8 +65,10 @@ describe.skipIf(!canRun)('det --kernel（linux 档）', () => {
       if (r.code !== 0) console.error(r.out, r.err);
       expect(r.code).toBe(0);
       for (const name of ['node', 'bun', 'bun-nojit']) expect(r.out).toMatch(new RegExp(`^${name} +x64 `, 'm'));
-      expect(r.out).toMatch(/^bun +x64 +1\.4\.\S+ +开启 /m);
-      expect(r.out).toMatch(/^bun-nojit +x64 +1\.4\.\S+ +关闭 /m);
+      // bun 一行的版本栏带内置 JSC 的版本（process.versions.webkit 前 8 位）
+      expect(r.out).toMatch(/^bun +x64 +1\.4\.\S+（WebKit [0-9a-f]{8}） +开启 /m);
+      expect(r.out).toMatch(/^bun-nojit +x64 +1\.4\.\S+（WebKit [0-9a-f]{8}） +关闭 /m);
+      expect(r.out).toMatch(/^node +x64 +v22\.\S+ +未知 /m);
       expect(r.out).toMatch(/^dsqrt 路径：一致——3 个引擎/m);
       expect(r.out).toMatch(/^Math\.sqrt 路径：一致——3 个引擎/m);
       expect(r.out).toContain('结论：通过');
@@ -87,7 +89,7 @@ describe.skipIf(!canRun)('det --kernel（linux 档）', () => {
       expect(r.out).toMatch(/路径：不一致/);
       expect(r.out).toContain('结论：失败');
       // node（V8）与 bun（JSC）至少一条路径哈希不同
-      const row = (name: string) => r.out.match(new RegExp(`^${name} +x64 +\\S+ +\\S+ +([0-9a-f]{8}) +([0-9a-f]{8}) `, 'm'));
+      const row = (name: string) => r.out.match(new RegExp(`^${name} +x64 .*?(?:开启|关闭|未知) +([0-9a-f]{8}) +([0-9a-f]{8}) `, 'm'));
       const n = row('node');
       const b = row('bun');
       expect(n).not.toBeNull();
@@ -136,7 +138,7 @@ describe.skipIf(!canRun)('det --kernel（linux 档）', () => {
       const j = JSON.parse(r.out) as {
         ok: boolean;
         shots: number;
-        engines: { name: string; ok: boolean; jit: boolean | null; paths: Record<string, { hash: string }> }[];
+        engines: { name: string; ok: boolean; jit: boolean | null; webkit: string | null; paths: Record<string, { hash: string }> }[];
         paths: Record<string, { consistent: boolean; baseline: string; hash: string }>;
         det: string;
       };
@@ -147,6 +149,11 @@ describe.skipIf(!canRun)('det --kernel（linux 档）', () => {
         ['bun', true, true],
         ['bun-nojit', true, false],
       ]);
+      // bun 两项带 process.versions.webkit（同一个 bun 二进制，值相同），node 没有
+      const [wn, wb, wbn] = j.engines.map((e) => e.webkit);
+      expect(wn).toBeNull();
+      expect(wb).toMatch(/^[0-9a-f]{8,}$/);
+      expect(wbn).toBe(wb!);
       expect(j.paths.dsqrt!.consistent).toBe(true);
       expect(j.paths.mathSqrt!.consistent).toBe(true);
       expect(j.paths.dsqrt!.hash).toBe(hex8(runKernel({ shots: 200 }).hash));

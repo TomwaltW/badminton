@@ -64,7 +64,7 @@ describe('driver.js', () => {
     expect(o.paths.dsqrt.checkpoints).toEqual(d.checkpoints);
     expect(o.paths.mathSqrt.hash).toBe(m.hash);
     expect(o.paths.mathSqrt.checkpoints).toEqual(m.checkpoints);
-    expect(o.engine).toEqual({ hasProcess: false, arch: null, nodeVersion: null, bunVersion: null });
+    expect(o.engine).toEqual({ hasProcess: false, arch: null, nodeVersion: null, bunVersion: null, webkitVersion: null, cwd: null });
     expect(o.jit).toBeNull();
     expect(o.dfgCompiles).toBeNull();
     expect(o.timer).toBe('Date.now');
@@ -125,6 +125,8 @@ describe('boot.cjs', () => {
     expect(r.exitCode).toBe(0);
     const o = parseDriverOutput(r.stdout.toString());
     expect(o.engine.bunVersion).toBe(Bun.version);
+    expect(o.engine.webkitVersion).toBe(process.versions.webkit!);
+    expect(o.engine.cwd).toBe(process.cwd());
     expect(o.engine.arch).toBe(process.arch);
     expect(o.engine.hasProcess).toBe(true);
     expect(typeof o.dfgCompiles).toBe('number');

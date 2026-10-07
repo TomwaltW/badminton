@@ -4,12 +4,13 @@
  * - 相对路径、~/ 展开、可执行文件缺失 / 不可执行 → 判失败；
  * - arch / 版本前缀 / JIT 状态 / kind 不符 → 判失败；
  * - runEngine 对退出码非 0、没有 @@DET@@ 行、超时、期望不符的处理（用 /bin/sh 写的假引擎）；
+ *   失败诊断（首条错误行、stderr / stdout 末尾）、两条路径同哈希判失败、子进程跑在空临时目录里；
  * - jsc 版本读取（假 plutil）、命令行拼接、子进程环境。
  */
 import { afterAll, describe, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 import {
   ConfigError,
   checkExpectations,
@@ -24,11 +25,15 @@ import {
 } from '../config';
 import {
   BOOT_CJS,
+  DIAG_TAIL_LINES,
   DRIVER_JS,
+  SQRT_CHECK_MIN_SHOTS,
   buildEngineArgv,
+  checkPathsDiffer,
   engineBinary,
   engineEnv,
   engineInfoFrom,
+  firstErrorLine,
   parseDriverOutput,
   readJscVersion,
   runEngine,
@@ -60,7 +65,7 @@ function spec(over: Partial<EngineSpec> = {}): EngineSpec {
 }
 
 function info(over: Partial<EngineInfo> = {}): EngineInfo {
-  return { arch: 'x64', version: 'v22.1.0', jit: null, hasProcess: true, isBun: false, ...over };
+  return { arch: 'x64', version: 'v22.1.0', webkit: null, jit: null, hasProcess: true, isBun: false, ...over };
 }
 
 /** 一份形状正确的 driver 输出。 */
@@ -72,7 +77,7 @@ function driverOutput(over: Partial<DriverOutput> = {}): DriverOutput {
     corpusVersion: 1,
     shots: 1,
     seed: null,
-    engine: { hasProcess: true, arch: 'x64', nodeVersion: 'v22.1.0', bunVersion: null },
+    engine: { hasProcess: true, arch: 'x64', nodeVersion: 'v22.1.0', bunVersion: null, webkitVersion: null, cwd: null },
     jit: null,
     dfgCompiles: null,
     timer: 'performance.now',
@@ -278,8 +283,11 @@ describe('期望：arch / 版本前缀 / JIT / kind', () => {
   });
 
   test('engineInfoFrom 按 kind 取版本', () => {
-    const o = driverOutput({ engine: { hasProcess: true, arch: 'x64', nodeVersion: 'v24.3.0', bunVersion: '1.4.2' } });
+    const o = driverOutput({
+      engine: { hasProcess: true, arch: 'x64', nodeVersion: 'v24.3.0', bunVersion: '1.4.2', webkitVersion: 'abcdef0123456789', cwd: '/t' },
+    });
     expect(engineInfoFrom(spec({ kind: 'bun' }), o, null).version).toBe('1.4.2');
+    expect(engineInfoFrom(spec({ kind: 'bun' }), o, null).webkit).toBe('abcdef0123456789');
     expect(engineInfoFrom(spec({ kind: 'node' }), o, null).version).toBe('v24.3.0');
     expect(engineInfoFrom(spec({ kind: 'jsc' }), o, '20621.1').version).toBe('20621.1');
     expect(engineInfoFrom(spec({ kind: 'bun' }), o, null).isBun).toBe(true);
@@ -344,7 +352,7 @@ describe('解析 @@DET@@ 行', () => {
   test('engine 缺字段 → 规范成 null / false，期望检查照常判失败而不崩溃', () => {
     const o = { ...driverOutput(), engine: { arch: 7 } };
     const p = parseDriverOutput(`@@DET@@ ${JSON.stringify(o)}`);
-    expect(p.engine).toEqual({ hasProcess: false, arch: null, nodeVersion: null, bunVersion: null });
+    expect(p.engine).toEqual({ hasProcess: false, arch: null, nodeVersion: null, bunVersion: null, webkitVersion: null, cwd: null });
     const s = spec({ expect: { arch: 'x64', version: 'v22.' } });
     expect(checkExpectations(s, engineInfoFrom(s, p, null))).toEqual([
       'kind 为 node，但引擎里没有 process',
@@ -363,7 +371,7 @@ describe('解析 @@DET@@ 行', () => {
 
 describe('runEngine（/bin/sh 写的假引擎）', () => {
   const dir = tmp('fake');
-  const opts = { simPath: '/nonexistent/sim.js', driverArgs: [], home: '/h', cwd: dir };
+  const opts = { simPath: '/nonexistent/sim.js', driverArgs: [], home: '/h' };
 
   test('相对路径 → 不启动、记为失败', () => {
     const r = runEngine(spec({ cmd: ['node'] }), opts);
@@ -387,6 +395,84 @@ describe('runEngine（/bin/sh 写的假引擎）', () => {
   test('没有 @@DET@@ 行 → 失败', () => {
     const p = script(dir, 'silent', 'echo hello');
     expect(runEngine(spec({ cmd: [p] }), opts).errors).toEqual(['输出里没有 @@DET@@ 行']);
+  });
+
+  test('node 形状的 stderr：错误行后有 10 多行栈，失败原因仍带上错误行；stderr 末尾保留 30 行', () => {
+    const stack = Array.from({ length: 25 }, (_, i) => `echo "    at f${i} (/x/boot.cjs:${i}:1)" >&2`).join('\n');
+    const p = script(
+      dir,
+      'node-like',
+      [
+        'echo "/tmp/boom-sim.js:1" >&2',
+        `echo 'throw new Error("a: b");' >&2`,
+        'echo "^" >&2',
+        'echo "" >&2',
+        'echo "Error: sim 加载失败：boom" >&2',
+        stack,
+        'echo "" >&2',
+        'echo "Node.js v22.22.0" >&2',
+        'exit 1',
+      ].join('\n'),
+    );
+    const r = runEngine(spec({ cmd: [p] }), opts);
+    // 源码行 throw new Error("a: b") 不算错误行
+    expect(r.errors).toEqual(['退出码 1：Error: sim 加载失败：boom']);
+    const tailLines = r.stderrTail.split('\n');
+    expect(tailLines).toHaveLength(DIAG_TAIL_LINES);
+    expect(tailLines.at(-1)).toBe('Node.js v22.22.0');
+    expect(r.stderrTail).toContain('at f0 ');
+    expect(r.stdoutTail).toBe('');
+  });
+
+  test('jsc 形状：未捕获异常写在 stdout、stderr 为空 → 失败原因带上异常行，stdout 末尾去掉 @@DET@@ 行', () => {
+    const p = script(
+      dir,
+      'jsc-like',
+      [
+        'echo "Exception: Error: sim 加载失败：boom"',
+        'echo "global code@/tmp/boom-sim.js:1:16"',
+        'echo \'@@DET@@ {"v":1}\'',
+        'echo "Exception: Error: driver.js：全局没有 BadmintonSim.kernel.run"',
+        'exit 3',
+      ].join('\n'),
+    );
+    const r = runEngine(spec({ kind: 'jsc', cmd: [p] }), opts);
+    expect(r.errors).toEqual(['退出码 3：Exception: Error: sim 加载失败：boom']);
+    expect(r.stderrTail).toBe('');
+    expect(r.stdoutTail).toBe(
+      ['Exception: Error: sim 加载失败：boom', 'global code@/tmp/boom-sim.js:1:16', 'Exception: Error: driver.js：全局没有 BadmintonSim.kernel.run'].join('\n'),
+    );
+  });
+
+  test('子进程的工作目录是新建的空临时目录（不是调用方的工作目录），结束后删除', () => {
+    const p = script(dir, 'pwd', 'pwd >&2; ls -A >&2; echo 结束 >&2; exit 5');
+    const r = runEngine(spec({ cmd: [p] }), opts);
+    const [cwd, ...rest] = r.stderrTail.split('\n');
+    expect(r.errors).toEqual(['退出码 5']);
+    expect(rest).toEqual(['结束']);
+    expect(cwd).not.toBe(process.cwd());
+    expect(cwd).not.toBe(resolve(import.meta.dir, '..', '..', '..'));
+    expect(basename(cwd!)).toStartWith('det-cwd-');
+    expect(existsSync(cwd!)).toBe(false);
+  });
+
+  test('sim 路径按调用方的工作目录解析成绝对路径再传给引擎', () => {
+    const p = script(dir, 'args', 'echo "$@" >&2; exit 4');
+    const r = runEngine(spec({ cmd: [p] }), { ...opts, simPath: 'rel/sim.js' });
+    expect(r.stderrTail).toBe(`${BOOT_CJS} ${resolve('rel/sim.js')} ${DRIVER_JS}`);
+  });
+
+  test('两条路径哈希相同（拍数够多）→ 失败：注入的 Math.sqrt 没有生效；输出仍保留供互比', () => {
+    const o = driverOutput({ shots: 2000 });
+    const same = { ...o, paths: { dsqrt: o.paths.dsqrt, mathSqrt: { ...o.paths.dsqrt } } };
+    const out = join(dir, 'same.txt');
+    writeFileSync(out, `@@DET@@ ${JSON.stringify(same)}\n`);
+    const p = script(dir, 'same', `cat ${JSON.stringify(out)}`);
+    const r = runEngine(spec({ cmd: [p] }), opts);
+    expect(r.errors).toHaveLength(1);
+    expect(r.errors[0]).toContain('dsqrt 路径与 Math.sqrt 路径哈希相同（00000001）');
+    expect(r.errors[0]).toContain('注入的 Math.sqrt 没有生效');
+    expect(r.output).not.toBeNull();
   });
 
   test('超时 → 失败', () => {
@@ -447,5 +533,30 @@ describe('jsc 版本：../Resources/Info.plist 的 CFBundleVersion', () => {
     expect(readJscVersion(jsc, join(root, 'no-plutil'))).toBeNull();
     expect(readJscVersion(jsc, script(root, 'failing', 'exit 1'))).toBeNull();
     expect(readJscVersion(jsc, script(root, 'empty', 'exit 0'))).toBeNull();
+  });
+});
+
+describe('失败诊断：错误行', () => {
+  test('匹配 node / bun / jsc 的错误行，不匹配源码行、栈帧与 @@DET@@ 行', () => {
+    expect(firstErrorLine('x\nError: a\n')).toBe('Error: a');
+    expect(firstErrorLine('TypeError [ERR_INVALID_ARG_TYPE]: b')).toBe('TypeError [ERR_INVALID_ARG_TYPE]: b');
+    expect(firstErrorLine('1 | throw x\n    error: c\n')).toBe('error: c');
+    expect(firstErrorLine('Exception: Error: d')).toBe('Exception: Error: d');
+    expect(firstErrorLine('Uncaught RangeError: e')).toBe('Uncaught RangeError: e');
+    expect(firstErrorLine('throw new Error("a: b");\n    at f (a.js:1:2)\n@@DET@@ {"Error: ":1}\nerrors: 3 个')).toBeNull();
+    // 先找第一段（stderr），没有再找第二段（stdout）
+    expect(firstErrorLine('', 'Exception: Error: s')).toBe('Exception: Error: s');
+    expect(firstErrorLine('Error: 先', 'Error: 后')).toBe('Error: 先');
+    expect(firstErrorLine(`Error: ${'长'.repeat(600)}`)!.length).toBe(501);
+  });
+});
+
+describe('两条路径必须不同', () => {
+  test(`拍数 ≥ ${SQRT_CHECK_MIN_SHOTS} 且哈希相同 → 问题；拍数太少或哈希不同 → 无问题`, () => {
+    const o = driverOutput({ shots: SQRT_CHECK_MIN_SHOTS });
+    const same = { ...o, paths: { dsqrt: o.paths.dsqrt, mathSqrt: { ...o.paths.dsqrt } } };
+    expect(checkPathsDiffer(same)[0]).toContain('注入的 Math.sqrt 没有生效');
+    expect(checkPathsDiffer({ ...same, shots: SQRT_CHECK_MIN_SHOTS - 1 })).toEqual([]);
+    expect(checkPathsDiffer(o)).toEqual([]);
   });
 });

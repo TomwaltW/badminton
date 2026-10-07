@@ -229,6 +229,8 @@ export interface EngineInfo {
   arch: string | null;
   /** 按 kind 取的版本：node → process.version，bun → process.versions.bun，jsc → CFBundleVersion；取不到为 null。 */
   version: string | null;
+  /** bun 内置 JSC 的版本（process.versions.webkit，WebKit 提交哈希）；node / jsc 为 null（jsc 的 JSC 版本就是 version）。 */
+  webkit: string | null;
   /** true 开启 / false 关闭 / null 未知（没有探针）。 */
   jit: boolean | null;
   /** driver 看到的环境：有没有 process、是不是 bun。用于发现 kind 写错。 */

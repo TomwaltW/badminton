@@ -5,6 +5,8 @@
  * 跨引擎互比、不存期望值：每条路径以第一个成功的引擎为基准，比较哈希、steps 与整个检查点序列，
  * 不一致时打印首个分歧的语料号（拍号）、全局 tick、检查点种类与双方哈希。
  *
+ * 任一引擎的两条路径哈希相同（拍数 ≥ 32 时）即判该引擎失败：说明注入的 Math.sqrt 没有生效。
+ *
  * 退出码：0 = 全部引擎通过且两条路径各自一致；1 = 有引擎失败或不一致；
  *         2 = 用法 / 配置 / 前置条件错误（参数不对、engines.json 坏、sim.js 不存在或过期、尚未实现的模式）。
  *
@@ -15,13 +17,22 @@ import { homedir, tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { REPO_ROOT, SIM_DIR, SIM_JS, SIM_VERSION_FILE } from '../sim/paths';
 import { fnv1aBytes } from '../sim/fnv';
-import { ConfigError, defaultProfile, jitLabel, loadEnginesConfig, selectProfile, type EngineSpec } from './config';
+import {
+  ConfigError,
+  defaultProfile,
+  jitLabel,
+  loadEnginesConfig,
+  selectProfile,
+  type EngineInfo,
+  type EngineSpec,
+} from './config';
 import { firstDivergence, formatDivergence, hex8, type CheckpointRecord, type Divergence } from './compare';
 import {
   DET_DIR,
   ENGINE_TIMEOUT_MS,
   PATH_KEYS,
   PATH_LABEL,
+  SQRT_CHECK_MIN_SHOTS,
   runEngine,
   type DriverPath,
   type EngineResult,
@@ -30,17 +41,28 @@ import {
 
 export const DEFAULT_ENGINES = resolve(DET_DIR, 'engines.json');
 
-/** 默认 sim 路径的前置检查用到的三个位置（可注入，单测用临时目录验证"不存在 / 比源码旧 / 版本文件不符"）。 */
+/** 默认 sim 路径的前置检查用到的位置（可注入，单测用临时目录验证"不存在 / 比源码旧 / 版本文件不符"）。 */
 export interface SimPaths {
   /** 默认要跑的 sim.js（packages/sim/dist/sim.js）。 */
   simJs: string;
-  /** 源码目录：其中任何 .ts 比 simJs 新即判过期。 */
-  srcDir: string;
+  /** 决定 sim.js 内容的输入：目录（递归取其中的 .ts）或单个文件；任何一个比 simJs 新即判过期。不存在的项跳过。 */
+  sources: string[];
   /** sim:build 写的 sim.version。 */
   versionFile: string;
 }
 
-export const DEFAULT_SIM_PATHS: SimPaths = { simJs: SIM_JS, srcDir: join(SIM_DIR, 'src'), versionFile: SIM_VERSION_FILE };
+/**
+ * 默认的陈旧检查输入：模拟核心源码、sim 经相对路径打包进来的 contracts 运行时代码，
+ * 以及决定产物形状的构建脚本（build.ts、paths.ts）。
+ */
+export const DEFAULT_SIM_SOURCES: readonly string[] = [
+  join(SIM_DIR, 'src'),
+  join(REPO_ROOT, 'packages/contracts/src'),
+  resolve(DET_DIR, '../sim/build.ts'),
+  resolve(DET_DIR, '../sim/paths.ts'),
+];
+
+export const DEFAULT_SIM_PATHS: SimPaths = { simJs: SIM_JS, sources: [...DEFAULT_SIM_SOURCES], versionFile: SIM_VERSION_FILE };
 export const FIXTURES: Record<string, string> = { sin: resolve(DET_DIR, 'fixtures/sin-entry.ts') };
 
 export interface DetArgs {
@@ -156,16 +178,26 @@ export function parseArgs(argv: string[]): DetArgs {
   return a;
 }
 
-/** packages/sim/src 下比 sim.js 新的 .ts 文件（相对仓库根）。 */
-export function staleSources(simJs: string, srcDir: string): string[] {
+/**
+ * sources 里比 sim.js 新的文件（相对仓库根，排序去重）：目录递归取其中的 .ts，文件直接比较（不限扩展名），
+ * 不存在的项跳过。
+ */
+export function staleSources(simJs: string, sources: readonly string[]): string[] {
   const t = statSync(simJs).mtimeMs;
-  const out: string[] = [];
-  for (const rel of readdirSync(srcDir, { recursive: true }) as string[]) {
-    if (!rel.endsWith('.ts')) continue;
-    const p = join(srcDir, rel);
-    if (statSync(p).mtimeMs > t) out.push(relative(REPO_ROOT, p));
+  const out = new Set<string>();
+  for (const src of sources) {
+    if (!existsSync(src)) continue;
+    if (!statSync(src).isDirectory()) {
+      if (statSync(src).mtimeMs > t) out.add(relative(REPO_ROOT, src));
+      continue;
+    }
+    for (const rel of readdirSync(src, { recursive: true }) as string[]) {
+      if (!rel.endsWith('.ts')) continue;
+      const p = join(src, rel);
+      if (statSync(p).mtimeMs > t) out.add(relative(REPO_ROOT, p));
+    }
   }
-  return out.sort();
+  return [...out].sort();
 }
 
 /** 显示宽度：CJK 与全角字符算 2。 */
@@ -273,10 +305,13 @@ function buildJson(ctx: Ctx, results: EngineResult[], paths: PathSummary[], ok: 
       errors: r.errors,
       arch: r.info ? r.info.arch : null,
       version: r.info ? r.info.version : null,
+      webkit: r.info ? r.info.webkit : null,
       jit: r.info ? r.info.jit : null,
       dfgCompiles: r.output ? r.output.dfgCompiles : null,
       timer: r.output ? r.output.timer : null,
       wallMs: Math.round(r.wallMs),
+      stderrTail: r.output ? '' : r.stderrTail,
+      stdoutTail: r.stdoutTail,
       paths: r.output
         ? Object.fromEntries(
             PATH_KEYS.map((k) => {
@@ -327,6 +362,17 @@ function buildJson(ctx: Ctx, results: EngineResult[], paths: PathSummary[], ok: 
   };
 }
 
+/**
+ * 版本一栏：按 kind 取的版本；bun 再附内置 JSC 的版本（process.versions.webkit 的前 8 位），
+ * 计划 6 章要求每行打印 JSC 版本（jsc 一行的版本本身就是 Info.plist 的 JSC 版本）。
+ */
+export function versionLabel(kind: EngineSpec['kind'], info: EngineInfo | null): string {
+  if (!info) return '-';
+  const ver = info.version ?? '未知';
+  if (kind !== 'bun') return ver;
+  return `${ver}（WebKit ${info.webkit ? info.webkit.slice(0, 8) : '未知'}）`;
+}
+
 /** 引擎表的一行。jsc 没有 process.arch，arch 一栏打印版本。 */
 function engineRow(r: EngineResult): string[] {
   const o = r.output;
@@ -336,7 +382,7 @@ function engineRow(r: EngineResult): string[] {
   return [
     r.spec.name,
     arch,
-    ver,
+    versionLabel(r.spec.kind, info),
     info ? jitLabel(info.jit) : '-',
     o ? hex8(o.paths.dsqrt.hash) : '-',
     o ? hex8(o.paths.mathSqrt.hash) : '-',
@@ -419,10 +465,11 @@ export async function main(argv: string[], simPaths: SimPaths = DEFAULT_SIM_PATH
         err(`[det] 找不到 ${shown(simPath)}：请先运行 bun run sim:build`);
         return 2;
       }
-      const stale = staleSources(simPath, simPaths.srcDir);
+      const stale = staleSources(simPath, simPaths.sources);
       if (stale.length > 0) {
         err(
-          `[det] ${shown(simPath)} 比源码旧（det 跑的是 dist/sim.js，不是源码），请重新运行 bun run sim:build。较新的源文件：\n` +
+          `[det] ${shown(simPath)} 比源码旧（det 跑的是 dist/sim.js，不是源码；检查 ${simPaths.sources.map(shown).join('、')}），` +
+            `请重新运行 bun run sim:build。较新的文件：\n` +
             indent(stale.join('\n'), 2),
         );
         return 2;
@@ -451,7 +498,7 @@ export async function main(argv: string[], simPaths: SimPaths = DEFAULT_SIM_PATH
     const results: EngineResult[] = [];
     const home = homedir();
     for (const spec of specs) {
-      const r = runEngine(spec, { simPath, driverArgs, home, cwd: REPO_ROOT });
+      const r = runEngine(spec, { simPath, driverArgs, home });
       results.push(r);
       const secs = r.wallMs > 0 ? `${(r.wallMs / 1000).toFixed(1)} 秒` : '未启动';
       out(`[det]   ${spec.name}：${r.errors.length === 0 ? '完成' : '失败'}（${secs}）`);
@@ -479,7 +526,14 @@ export async function main(argv: string[], simPaths: SimPaths = DEFAULT_SIM_PATH
       for (const r of failed) {
         for (const e of r.errors) lines.push(`  ${r.spec.name}：${e}`);
         if (r.stderrTail && !r.output) lines.push(indent(`stderr 末尾：\n${indent(r.stderrTail, 2)}`, 4));
+        if (r.stdoutTail && !r.output) lines.push(indent(`stdout 末尾（不含 @@DET@@ 行）：\n${indent(r.stdoutTail, 2)}`, 4));
       }
+    }
+    if (first && first.shots < SQRT_CHECK_MIN_SHOTS) {
+      lines.push('');
+      lines.push(
+        `注：拍数 ${first.shots} < ${SQRT_CHECK_MIN_SHOTS}，没有检查"注入的 Math.sqrt 是否生效"（拍数太少时正确的 sim 两条路径也可能同哈希）`,
+      );
     }
     lines.push('');
     for (const s of paths) {

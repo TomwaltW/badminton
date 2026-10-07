@@ -12,6 +12,9 @@
 | Math.sqrt | 由 driver 从外部注入 `Math.sqrt` | 对照路径；`sim.js` 里不出现 `Math.sqrt`（`sim:scan` 会拒绝） |
 
 两条路径的哈希本来就不同（`dsqrt` 与 `Math.sqrt` 约 25% 输入差 1 ulp）；门禁要求的是**每条路径在各引擎上各自逐位一致**。
+反过来，任一引擎上两条路径的哈希**相同**也判该引擎失败：说明 sim 忽略了 `kernel.run` 的 `sqrt` 选项，
+注入的 `Math.sqrt` 没有生效，Math.sqrt 路径跑成了 dsqrt 路径、失去对照意义。正确的 sim 单拍里两者处处同值的概率约 0.3
+（默认种子下 `--shots 1` 两条路径就同哈希），所以只在拍数 ≥ 32 时检查（同哈希的概率约 0.3^32）；拍数更少时打印一行"注："说明没有检查。
 
 ## 用法
 
@@ -39,7 +42,9 @@ bun run det --kernel --profile linux --fixture sin   # 自测：必须判红
 
 用默认 sim 路径时，det 先做三项检查，不过就以退出码 2 结束：
 - `dist/sim.js` 不存在 → 提示先 `bun run sim:build`；
-- `packages/sim/src` 下有任何 `.ts` 比 `dist/sim.js` 新 → 提示重新构建（并列出较新的文件）；
+- 决定 sim.js 内容的输入里有任何一个比 `dist/sim.js` 新 → 提示重新构建（并列出较新的文件）。输入 =
+  `packages/sim/src/**/*.ts`、`packages/contracts/src/**/*.ts`（sim 经相对路径打包的契约运行时代码）、
+  `tools/sim/build.ts`、`tools/sim/paths.ts`（构建脚本本身也决定产物）；
 - `dist/sim.version` 存在但与 sim.js 的字节哈希不符（sim.js 被手改过）→ 提示重新构建。
 
 `--sim` 显式指定路径时不做这些检查。
@@ -77,9 +82,30 @@ bun run det --kernel --profile linux --fixture sin   # 自测：必须判红
 **环境**：子进程继承当前环境，但去掉 `BUN_JSC_*`、`JSC_*`、`NODE_OPTIONS`、`BUN_OPTIONS`、`NODE_V8_COVERAGE`
 （它们会改变引擎行为），再叠上条目里的 `env`。所以在 `BUN_JSC_useJIT=0 bun run det` 下，`bun` 一项仍是 JIT。
 
+**工作目录**：每个引擎子进程都在一个新建的**空临时目录**（`$TMPDIR/det-cwd-*`）里运行，结束后删除；`boot.cjs`、`sim.js`、
+`driver.js` 一律以绝对路径传入（`--sim` 的相对路径按 det 的工作目录解析）。bun 会读取工作目录下的 `bunfig.toml`
+（例如 `preload`），在仓库根或调用方目录里跑就可能被注入代码。
+
 **判失败**（任何一个引擎）：可执行文件不存在 / 不是绝对路径 / 不可执行、退出码非 0、超时（300 秒）、
-输出里没有 `@@DET@@` 行、arch 不符、版本前缀不符、JIT 状态不符（或期望了 JIT 却没有探针）、`kind` 与实际引擎不符。
-期望不符但能跑出结果的引擎仍参与互比，只是已记为失败。
+输出里没有 `@@DET@@` 行、arch 不符、版本前缀不符、JIT 状态不符（或期望了 JIT 却没有探针）、`kind` 与实际引擎不符、
+两条路径哈希相同（拍数 ≥ 32 时，见上文）。期望不符但能跑出结果的引擎仍参与互比，只是已记为失败。
+
+**失败诊断**：没拿到有效输出时（退出码非 0、超时、没有 `@@DET@@` 行），失败原因后面接上第一条错误行
+（先找 stderr 再找 stdout；行首是 `XxxError` / `Exception` / `error`、后跟可选的 `[代码]` 与冒号，例如 node 的 `Error: …`、
+bun 的 `error: …`、jsc 的 `Exception: Error: …`），再打印 stderr 末尾 30 行与 stdout 末尾 30 行（去掉 `@@DET@@` 行）。
+node 的错误行后面还有 10 行栈、空行与 `Node.js vNN`，只看末尾会截掉它；jsc 把未捕获异常写到 stdout、stderr 为空。例如：
+
+```
+引擎失败：
+  node：退出码 1：Error: sim 加载失败：boom
+    stderr 末尾：
+      …
+  jsc：退出码 3：Exception: Error: sim 加载失败：boom
+    stdout 末尾（不含 @@DET@@ 行）：
+      Exception: Error: sim 加载失败：boom
+      global code@/…/boom-sim.js:1:16
+      …
+```
 
 ## 加载方式：每个引擎都一样
 
@@ -96,7 +122,8 @@ bun run det --kernel --profile linux --fixture sin   # 自测：必须判红
 
 1. 跑 `BadmintonSim.kernel.run({ shots, checkpoints: true })`（dsqrt 路径）与 `run({ shots, checkpoints: true, sqrt: Math.sqrt })`；
    分别计时（`performance.now` → `preciseTime` → `Date.now`，取第一个可用的）；1 step = 1 tick = 2 个子步。
-2. 引擎信息：`process.arch`、`process.version`、`process.versions.bun`（jsc 下没有 `process`）。
+2. 引擎信息：`process.arch`、`process.version`、`process.versions.bun`、`process.versions.webkit`（bun 内置 JSC 的 WebKit 提交）、
+   `process.cwd()`（jsc 下没有 `process`，全为 null）。
 3. JIT 探针：全局 `numberOfDFGCompiles`（jsc 命令行）或 `__detJitProbe`（bun），作用于 `BadmintonSim.flight.stepRk4`：
    返回 `1000000`（JSC 在 JIT 关闭时的哨兵值）= 关闭，其他 = 开启；没有探针（node）= 未知。
 4. 输出一行 `@@DET@@ <JSON>`（node / bun 用 `console.log`，jsc 用 `print`）。
@@ -117,10 +144,10 @@ linux 档（2026-10-07，本容器实测）：
 [det]   bun-nojit：完成（0.8 秒）
 
 语料版本 1，API 版本 0，拍数 2000；1 step = 1 tick = 2 个 1/60 s 子步；steps/s 取 dsqrt 路径
-引擎       arch  版本      JIT   dsqrt 哈希  Math.sqrt 哈希  steps    steps/s  结果
-node       x64   v22.22.0  未知  efc2c7f7    99ef999f        98311  1,236,382  通过
-bun        x64   1.4.2     开启  efc2c7f7    99ef999f        98311  1,520,658  通过
-bun-nojit  x64   1.4.2     关闭  efc2c7f7    99ef999f        98311    208,372  通过
+引擎       arch  版本                      JIT   dsqrt 哈希  Math.sqrt 哈希  steps    steps/s  结果
+node       x64   v22.22.0                  未知  efc2c7f7    99ef999f        98311  1,254,304  通过
+bun        x64   1.4.2（WebKit 2e2aa229）  开启  efc2c7f7    99ef999f        98311  1,494,726  通过
+bun-nojit  x64   1.4.2（WebKit 2e2aa229）  关闭  efc2c7f7    99ef999f        98311    174,985  通过
 
 dsqrt 路径：一致——3 个引擎的哈希 efc2c7f7、steps 98311 与全部 5277 条检查点相同（基准 node）
 Math.sqrt 路径：一致——3 个引擎的哈希 99ef999f、steps 98311 与全部 5277 条检查点相同（基准 node）
@@ -132,7 +159,9 @@ DET efc2c7f7 98311
 （哈希随源码变化，上面的值只是示例；门禁从不和固定值比较。）
 
 - **simVer**：所跑 sim.js 文件字节的 FNV-1a，与 `dist/sim.version` 相同。
-- **表格**：每个引擎一行。`arch` 是 `process.arch`（jsc 没有，这一栏打印版本）；`版本` 按 kind 取；
+- **表格**：每个引擎一行。`arch` 是 `process.arch`（jsc 没有，这一栏打印版本）；`版本` 按 kind 取，
+  bun 再附内置 JSC 的版本 `（WebKit <process.versions.webkit 前 8 位>）`（计划 6 章：每行打印 `process.arch` 与 JSC 版本；
+  jsc 一行的版本本身就是 Info.plist 的 JSC 版本；node 是 V8，不附）；
   `JIT` 是探针结果；`steps/s` 是 dsqrt 路径的模拟速度（含 JIT 预热，只作量级参考）；`结果` 是该引擎自身的检查（路径、退出码、期望）。
 - **路径行**：以第一个成功的引擎为基准，比较哈希、steps 与**整个检查点序列**（每条 = 种类、拍号、全局 tick、哈希）。
 - **`DET <dsqrt 哈希> <steps>`**：基准引擎的 dsqrt 路径结果。`tools/wx-selftest` 在真机上打印的 `DET <hash> <n> <steps/s>`
@@ -156,8 +185,9 @@ dsqrt 路径：不一致（基准 node：f30315c0，94646 steps，5154 条检查
 如果双方连检查点的位置都不同了（例如一方早一个 tick 落地），会分别列出双方那一条的拍号、tick 与种类。
 
 `--json` 的字段：`ok`、`exitCode`、`profile`、`sim{path,simVer,bytes,fixture}`、`shots`、`corpusVersion`、
-`engines[]{name,kind,cmd,env,ok,errors,arch,version,jit,dfgCompiles,timer,wallMs,paths{dsqrt,mathSqrt}{hash,steps,substeps,ms,stepsPerSec,checkpoints}}`、
+`engines[]{name,kind,cmd,env,ok,errors,arch,version,webkit,jit,dfgCompiles,timer,wallMs,stderrTail,stdoutTail,paths{dsqrt,mathSqrt}{hash,steps,substeps,ms,stepsPerSec,checkpoints}}`、
 `paths{dsqrt,mathSqrt}{consistent,baseline,hash,steps,checkpoints,divergences[]}`、`det`。哈希一律是 8 位十六进制字符串。
+`webkit` 是完整的 `process.versions.webkit`（只有 bun 有，其余为 null）；`stderrTail` / `stdoutTail` 只在没拿到有效输出时非空。
 
 ## 在 Mac 上跑（mac 档）
 
@@ -197,10 +227,16 @@ bun test tools/det/test
 - `compare.test.ts`：首个分歧逻辑（构造检查点数组）与基准选择；
 - `config.test.ts`：清单结构校验、随仓库的两档清单、相对路径 / `~/` 展开 / 缺失 / 不可执行、arch / 版本 / JIT / kind 不符、
   用 `/bin/sh` 假引擎测退出码、无 `@@DET@@`、超时、环境变量，`@@DET@@` 行形状校验（检查点不是整条记录、引擎字段缺失），
+  失败诊断（node 形状的 stderr、jsc 形状的 stdout、错误行匹配）、两条路径同哈希判失败、子进程工作目录是空临时目录且事后删除，
   假 `plutil` 测 jsc 版本读取；
 - `driver.test.ts`：driver 只用 ES2017 语法；在只有 `print` 与 `arguments` 的 vm 上下文里跑通并与源码同哈希；JIT 探针语义；`boot.cjs`；
 - `cli.test.ts`：参数解析（开关参数不接受 `=值`）、尚未实现的模式、前置条件错误；默认 sim 路径的三项前置检查
-  （不存在 / 比源码旧 / `sim.version` 不符 → 2，检查通过后照常跑引擎）用注入的临时目录验证，不碰真实 `dist`；
+  （不存在 / 比源码旧——含 contracts 源码与构建脚本 / `sim.version` 不符 → 2，检查通过后照常跑引擎）用注入的临时目录验证，
+  不碰真实 `dist`；默认陈旧检查输入的清单；版本一栏（bun 附 WebKit）；
+- `engines.integration.test.ts`（bun 用当前进程；node 取本平台档里的 node、`/usr/bin/jsc` 存在时测 jsc，缺哪个跳过哪个）：
+  加载时抛错的 sim 在 node / bun / jsc 上失败原因都带错误行、det 打印 stderr / stdout 末尾；忽略 `sqrt` 选项的假 sim
+  判失败（`--shots 1` 不判、只提示）；bun 一行带 WebKit 版本、`--json` 带 `webkit`；
+  子进程 `process.cwd()` 是已删除的临时目录、调用方目录下 `bunfig.toml` 的 preload 不生效；
 - `det.integration.test.ts`（只在 linux 上跑，linux 档引擎不全时跳过）：真实 sim 三引擎通过、`--fixture sin` 判红（退出码 1）、
   引擎缺失 / 相对路径 / arch 不符时即使哈希一致也退出 1、`--json`，
   以及有 `/usr/bin/jsc` 时把 `jsc --useJIT=false`（kind jsc）与 node 放在一起跑，验证 jsc 的加载与输出路径。

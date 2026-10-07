@@ -10,7 +10,8 @@
  * 做的事：
  * 1. 跑内核语料两遍：dsqrt 路径（sim 默认）与 Math.sqrt 路径（sqrt: Math.sqrt 由这里从外部注入，
  *    sim.js 里不出现 Math.sqrt），都带检查点；分别计时（1 step = 1 tick = 2 个子步）。
- * 2. 收集引擎信息：process.arch、process.version、process.versions.bun（jsc 下全无）。
+ * 2. 收集引擎信息：process.arch、process.version、process.versions.bun、process.versions.webkit（bun 内置 JSC 的版本）、
+ *    process.cwd()（jsc 下全无）。
  * 3. JIT 探针：全局 numberOfDFGCompiles（jsc 命令行）或 __detJitProbe（bun，由 boot.cjs 放入），
  *    作用于 BadmintonSim.flight.stepRk4：返回 1000000 = JIT 关闭，其他 = 开启；没有探针 = 未知（null）。
  * 4. 输出一行：@@DET@@ <JSON>。det.ts 只认这一行。
@@ -113,11 +114,20 @@
   }
 
   var P = G.process;
+  var cwd = null;
+  try {
+    if (P && typeof P.cwd === 'function') cwd = String(P.cwd());
+    // eslint-disable-next-line no-unused-vars -- ES2017 没有可省略的 catch 绑定
+  } catch (e) {
+    cwd = null; // 工作目录已不存在等：只是信息字段，不让它拖垮整次运行
+  }
   var engine = {
     hasProcess: !!P,
     arch: P && P.arch ? String(P.arch) : null,
     nodeVersion: P && P.version ? String(P.version) : null,
     bunVersion: P && P.versions && P.versions.bun ? String(P.versions.bun) : null,
+    webkitVersion: P && P.versions && P.versions.webkit ? String(P.versions.webkit) : null,
+    cwd: cwd,
   };
 
   emit(

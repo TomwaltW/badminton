@@ -184,7 +184,7 @@ describe('comparePath（det.ts）', () => {
             corpusVersion: 1,
             shots: 2,
             seed: null,
-            engine: { hasProcess: true, arch: 'x64', nodeVersion: 'v22.0.0', bunVersion: null },
+            engine: { hasProcess: true, arch: 'x64', nodeVersion: 'v22.0.0', bunVersion: null, webkitVersion: null, cwd: null },
             jit: null,
             dfgCompiles: null,
             timer: 'performance.now',
@@ -194,6 +194,7 @@ describe('comparePath（det.ts）', () => {
         : null,
     wallMs: 1,
     stderrTail: '',
+    stdoutTail: '',
   });
 
   test('以第一个成功的引擎为基准；没有输出的引擎不参与互比', () => {

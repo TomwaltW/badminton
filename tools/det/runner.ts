@@ -4,12 +4,15 @@
  * 加载方式统一为"sim.js 与 driver.js 当经典脚本、在同一个全局作用域里依次执行"：
  *   node / bun：<cmd…> boot.cjs <sim.js> <driver.js> <参数…>
  *   jsc：       <cmd…> <sim.js> <driver.js> -- <参数…>
+ * boot.cjs、sim.js、driver.js 一律以绝对路径传入；子进程的工作目录是每次新建的空临时目录（结束后删除），
+ * 免得 bun 读到工作目录下的 bunfig.toml（例如 preload）而被注入代码。
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
 import { checkExpectations, isPathArg, resolveCommand, type EngineInfo, type EngineSpec } from './config';
-import { DEFAULT_LAYOUT, type CheckpointLayout } from './compare';
+import { DEFAULT_LAYOUT, hex8, type CheckpointLayout } from './compare';
 
 export const DET_DIR = import.meta.dir;
 export const BOOT_CJS = resolve(DET_DIR, 'boot.cjs');
@@ -19,6 +22,21 @@ export const DET_MARK = '@@DET@@ ';
 export const ENGINE_TIMEOUT_MS = 300_000;
 /** 读 jsc 版本用的 plutil（macOS 自带）。 */
 export const PLUTIL = '/usr/bin/plutil';
+/** 失败诊断保留 stderr / stdout 末尾多少行（node 的错误行后面还有 10 行栈、空行与 "Node.js vNN"）。 */
+export const DIAG_TAIL_LINES = 30;
+/** 错误行的最大长度（超出截断）。 */
+const ERROR_LINE_MAX = 500;
+/**
+ * 错误行：行首（可缩进）是 XxxError / Exception / error，后跟可选的 [代码] 与英文冒号。
+ * 例如 node 的 "Error: x"、"TypeError [ERR_X]: x"，bun 的 "error: x"，jsc 写到 stdout 的 "Exception: Error: x"；
+ * 不匹配 node 回显的源码行 "throw new Error("a: b")"。
+ */
+export const ERROR_LINE_RE = /^\s*(?:Uncaught\s+)?(?:\w*Error|Exception|error)\b(?:\s*\[[^\]\n]*\])?:/;
+/**
+ * "两条路径哈希相同即判失败"的最小拍数。正确的 sim 单拍里 dsqrt 与 Math.sqrt 恰好处处同值的概率约 0.3
+ * （默认种子下 --shots 1 两条路径就同哈希），N 拍约 0.3^N；32 拍以上同哈希只可能是注入的 Math.sqrt 没有生效。
+ */
+export const SQRT_CHECK_MIN_SHOTS = 32;
 
 /** 继承环境时去掉的变量：它们会改变引擎行为，引擎只带 engines.json 里写明的 env。 */
 const SCRUB_ENV_RE = /^(BUN_JSC_|JSC_|NODE_OPTIONS$|BUN_OPTIONS$|NODE_V8_COVERAGE$)/;
@@ -39,7 +57,16 @@ export interface DriverOutput {
   corpusVersion: number;
   shots: number;
   seed: number | null;
-  engine: { hasProcess: boolean; arch: string | null; nodeVersion: string | null; bunVersion: string | null };
+  engine: {
+    hasProcess: boolean;
+    arch: string | null;
+    nodeVersion: string | null;
+    bunVersion: string | null;
+    /** process.versions.webkit：bun 内置 JSC 的 WebKit 提交；node / jsc 为 null。 */
+    webkitVersion: string | null;
+    /** 引擎里的 process.cwd()（jsc 为 null）；用于确认子进程跑在空临时目录里。 */
+    cwd: string | null;
+  };
   jit: boolean | null;
   dfgCompiles: number | null;
   timer: string;
@@ -62,7 +89,10 @@ export interface EngineResult {
   output: DriverOutput | null;
   /** 子进程墙钟耗时（毫秒）。 */
   wallMs: number;
+  /** stderr 末尾 DIAG_TAIL_LINES 行。 */
   stderrTail: string;
+  /** 没拿到有效输出时 stdout 的末尾 DIAG_TAIL_LINES 行（去掉 @@DET@@ 行；jsc 把未捕获异常写在 stdout）；否则为空串。 */
+  stdoutTail: string;
 }
 
 /** 拼出完整命令行。 */
@@ -124,6 +154,8 @@ export function parseDriverOutput(stdout: string): DriverOutput {
     arch: str(e.arch),
     nodeVersion: str(e.nodeVersion),
     bunVersion: str(e.bunVersion),
+    webkitVersion: str(e.webkitVersion),
+    cwd: str(e.cwd),
   };
   if (o.jit !== true && o.jit !== false) o.jit = null;
   return o;
@@ -164,10 +196,23 @@ export function engineInfoFrom(spec: EngineSpec, out: DriverOutput, jscVersion: 
   return {
     arch: e.arch,
     version,
+    webkit: e.webkitVersion,
     jit: out.jit,
     hasProcess: e.hasProcess === true,
     isBun: e.bunVersion !== null,
   };
+}
+
+/**
+ * 两条路径是否真的不同：拍数够多（≥ SQRT_CHECK_MIN_SHOTS）而 dsqrt 与 Math.sqrt 路径哈希相同，
+ * 说明 sim 忽略了注入的 sqrt，Math.sqrt 对照路径跑成了 dsqrt 路径，失去意义。返回问题列表（空 = 通过）。
+ */
+export function checkPathsDiffer(out: DriverOutput): string[] {
+  const d = out.paths.dsqrt.hash >>> 0;
+  if (out.shots < SQRT_CHECK_MIN_SHOTS || d !== out.paths.mathSqrt.hash >>> 0) return [];
+  return [
+    `dsqrt 路径与 Math.sqrt 路径哈希相同（${hex8(d)}）：注入的 Math.sqrt 没有生效（sim 忽略了 kernel.run 的 sqrt 选项？），Math.sqrt 对照路径失去意义`,
+  ];
 }
 
 function tail(text: string, n: number): string {
@@ -175,11 +220,31 @@ function tail(text: string, n: number): string {
   return lines.slice(-n).join('\n');
 }
 
+/** 去掉 @@DET@@ 行（诊断里不需要那一大行 JSON）。 */
+function withoutDetLines(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .filter((l) => !l.startsWith(DET_MARK))
+    .join('\n');
+}
+
+/** 依次在各段文本里找第一条错误行（见 ERROR_LINE_RE）；找不到返回 null。 */
+export function firstErrorLine(...texts: string[]): string | null {
+  for (const text of texts) {
+    for (const line of text.split(/\r?\n/)) {
+      if (line.startsWith(DET_MARK) || !ERROR_LINE_RE.test(line)) continue;
+      const t = line.trim();
+      return t.length > ERROR_LINE_MAX ? `${t.slice(0, ERROR_LINE_MAX)}…` : t;
+    }
+  }
+  return null;
+}
+
 export interface RunOptions {
+  /** sim.js；相对路径按 det 进程的工作目录解析成绝对路径（子进程的工作目录是空临时目录）。 */
   simPath: string;
   driverArgs: string[];
   home: string;
-  cwd: string;
   timeoutMs?: number;
 }
 
@@ -194,50 +259,58 @@ export function runEngine(spec: EngineSpec, opts: RunOptions): EngineResult {
     output: null,
     wallMs: 0,
     stderrTail: '',
+    stdoutTail: '',
   };
   if (res.errors.length > 0) return res;
 
-  const argv = buildEngineArgv(spec, resolved.cmd, opts.simPath, opts.driverArgs);
+  const argv = buildEngineArgv(spec, resolved.cmd, resolve(opts.simPath), opts.driverArgs);
   const timeout = opts.timeoutMs ?? ENGINE_TIMEOUT_MS;
-  const t0 = performance.now();
+  // 空的临时工作目录：bun 会读工作目录下的 bunfig.toml（preload 等），不能在仓库根或调用方目录里跑
+  const cwd = mkdtempSync(join(tmpdir(), 'det-cwd-'));
   let r: ReturnType<typeof Bun.spawnSync>;
   try {
-    r = Bun.spawnSync({
-      cmd: argv,
-      cwd: opts.cwd,
-      env: engineEnv(spec),
-      stdin: 'ignore',
-      stdout: 'pipe',
-      stderr: 'pipe',
-      timeout,
-      // 超时直接 SIGKILL：引擎卡在长循环里时不一定及时响应 SIGTERM
-      killSignal: 'SIGKILL',
-    });
-  } catch (e) {
-    res.errors.push(`无法启动：${(e as Error).message}`);
-    return res;
+    const t0 = performance.now();
+    try {
+      r = Bun.spawnSync({
+        cmd: argv,
+        cwd,
+        env: engineEnv(spec),
+        stdin: 'ignore',
+        stdout: 'pipe',
+        stderr: 'pipe',
+        timeout,
+        // 超时直接 SIGKILL：引擎卡在长循环里时不一定及时响应 SIGTERM
+        killSignal: 'SIGKILL',
+      });
+    } catch (e) {
+      res.errors.push(`无法启动：${(e as Error).message}`);
+      return res;
+    }
+    res.wallMs = performance.now() - t0;
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
   }
-  res.wallMs = performance.now() - t0;
   const stdout = r.stdout ? r.stdout.toString() : '';
   const stderr = r.stderr ? r.stderr.toString() : '';
-  res.stderrTail = tail(stderr, 12);
+  res.stderrTail = tail(stderr, DIAG_TAIL_LINES);
+  /** 没拿到有效输出时的诊断：首条错误行（先 stderr 后 stdout）接在原因后面，并保留 stdout 末尾。 */
+  const fail = (why: string): EngineResult => {
+    const line = firstErrorLine(stderr, stdout);
+    res.errors.push(line ? `${why}：${line}` : why);
+    res.stdoutTail = tail(withoutDetLines(stdout), DIAG_TAIL_LINES);
+    return res;
+  };
 
-  if (r.exitedDueToTimeout) {
-    res.errors.push(`超时：${Math.round(timeout / 1000)} 秒内没有结束`);
-    return res;
-  }
-  if (r.exitCode !== 0) {
-    res.errors.push(`退出码 ${r.exitCode ?? `（信号 ${r.signalCode ?? '未知'}）`}`);
-    return res;
-  }
+  if (r.exitedDueToTimeout) return fail(`超时：${Math.round(timeout / 1000)} 秒内没有结束`);
+  if (r.exitCode !== 0) return fail(`退出码 ${r.exitCode ?? `（信号 ${r.signalCode ?? '未知'}）`}`);
   try {
     res.output = parseDriverOutput(stdout);
   } catch (e) {
-    res.errors.push((e as Error).message);
-    return res;
+    return fail((e as Error).message);
   }
   const jscVersion = spec.kind === 'jsc' ? readJscVersion(engineBinary(resolved.cmd)) : null;
   res.info = engineInfoFrom(spec, res.output, jscVersion);
   res.errors.push(...checkExpectations(spec, res.info));
+  res.errors.push(...checkPathsDiffer(res.output));
   return res;
 }
