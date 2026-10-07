@@ -2,14 +2,20 @@
  * bun run gate [--profile linux|mac] [--quiet]：门禁总入口（计划 4.2、6 章；派单 A 第 7 项）。
  *
  * 按顺序跑：
- *   1. tsc -b                      node_modules/.bin/tsc（全仓库工程引用）
+ *   1. tsc -b --force              node_modules/.bin/tsc（全仓库工程引用）。用 --force 全量重查（约几秒）：
+ *                                  增量构建按时间戳与 .tsbuildinfo 判断"已是最新"，依赖的类型变化后可能不重查，会假绿。
  *   2. ESLint 禁令                  node_modules/.bin/eslint .
- *   3. bun test                    只跑 ./packages 与 ./tools 下的测试。路径参数以 ./ 开头时 bun 按路径前缀
+ *   3. 契约偏移                     bun run contracts:gen --check：快照偏移生成文件与 snapshot.schema.ts 不一致
+ *                                  （或缺失）即失败。
+ *   4. bun test                    只跑 ./packages 与 ./tools 下的测试。路径参数以 ./ 开头时 bun 按路径前缀
  *                                  匹配；不带 ./ 的参数是"文件路径子串过滤"，会把 .worktrees/task-xx/packages/…
  *                                  也算进来（bun 1.4.2 实测，见 tools/gate/test/gate.test.ts）。
- *   4. bun run sim:build
- *   5. bun run sim:scan            sim:build 没通过则跳过
- *   6. bun run det --kernel        sim:build 没通过则跳过；--profile 原样透传，不给则由 det 按平台选档
+ *                                  以 CI=true 启动：bun 在 CI 下遇到 .only 直接失败，漏删的 test.only 不会让同文件
+ *                                  其它测试静默不跑。退出码 0 还不够：必须解析到摘要、0 失败、至少 1 条测试才算
+ *                                  通过——测试里的 process.exit(0) 会截断整套测试，bun 照样退出 0 且没有摘要。
+ *   5. bun run sim:build
+ *   6. bun run sim:scan            sim:build 没通过则跳过
+ *   7. bun run det --kernel        sim:build 没通过则跳过；--profile 原样透传，不给则由 det 按平台选档
  * 每步打印标题、实时输出（--quiet 时只在失败时打印完整输出）、耗时与退出码；某步失败不影响后续步骤
  * （除上面的依赖），最后打印汇总表。全部通过退出 0，否则 1；参数错误退出 2。
  *
@@ -23,6 +29,7 @@ import {
   clip,
   formatBunTest,
   parseBunTest,
+  parseContractsCheck,
   parseDet,
   parseEslint,
   parseSimBuild,
@@ -44,12 +51,16 @@ export interface GateStep {
   id: string;
   title: string;
   cmd: string[];
+  /** 额外的环境变量：合并进运行环境（同名时以这里为准）。 */
+  env?: Readonly<Record<string, string>>;
   /** 这些步骤（按 id）没有通过时跳过本步。 */
   needs?: string[];
   /** 启动前的检查：返回说明文字则本步直接判失败、不启动进程。 */
   precheck?: () => string | null;
   /** 从输出与退出码提取要点（汇总表的"要点"列）。 */
   summarize?: (output: string, exitCode: number) => string;
+  /** 退出码为 0 时的进一步判定：返回说明文字则本步仍判失败，要点换成这段说明。 */
+  check?: (output: string) => string | null;
 }
 
 export interface StepResult {
@@ -118,7 +129,7 @@ export async function runSteps(steps: readonly GateStep[], opts: RunStepsOptions
     let endsWithNewline = true;
     const r = await runner(step.cmd, {
       cwd: opts.cwd,
-      env: opts.env,
+      env: step.env ? { ...(opts.env ?? process.env), ...step.env } : opts.env,
       onOutput: opts.quiet
         ? undefined
         : (chunk) => {
@@ -126,19 +137,31 @@ export async function runSteps(steps: readonly GateStep[], opts: RunStepsOptions
             endsWithNewline = chunk.endsWith('\n');
           },
     });
-    const ok = r.exitCode === 0;
-    if (opts.quiet && !ok) {
-      write(`── 完整输出 ──\n${r.output}`);
-      endsWithNewline = r.output.length === 0 || r.output.endsWith('\n');
-    }
-    if (!endsWithNewline) write('\n');
-
+    let ok = r.exitCode === 0;
     let note = '';
     try {
       note = step.summarize?.(r.output, r.exitCode) ?? '';
     } catch (e) {
       note = `（解析输出失败：${(e as Error).message}）`;
     }
+    if (ok && step.check) {
+      let why: string | null;
+      try {
+        why = step.check(r.output);
+      } catch (e) {
+        why = `（判定输出失败：${(e as Error).message}）`;
+      }
+      if (why !== null) {
+        ok = false;
+        note = why;
+      }
+    }
+    if (opts.quiet && !ok) {
+      write(`── 完整输出 ──\n${r.output}`);
+      endsWithNewline = r.output.length === 0 || r.output.endsWith('\n');
+    }
+    if (!endsWithNewline) write('\n');
+
     if (r.timedOut) note = note ? `超时；${note}` : '超时';
     if (r.error && !note) note = r.error;
 
@@ -164,6 +187,20 @@ export interface GateStepsOptions {
   profile?: string | null;
 }
 
+/**
+ * bun test 退出码为 0 时的进一步判定：没有摘要、有失败、摘要不完整或一条测试都没跑都判失败。
+ * 测试里调用 process.exit(0) 会让 bun 当场退出 0、不打印摘要，后面的测试（包括失败的）都没跑。
+ */
+function checkBunTest(output: string): string | null {
+  const s = parseBunTest(output);
+  if (!s) return '没有测试摘要（可能被 process.exit 截断）';
+  const sum = formatBunTest(s);
+  if (s.fail > 0) return `${sum}；退出码 0 却有失败`;
+  if (s.tests === null) return `${sum}；摘要缺少 "Ran N tests" 行（输出可能被截断）`;
+  if (s.tests === 0) return `${sum}；一条测试都没跑`;
+  return null;
+}
+
 function needBin(root: string, bin: string): () => string | null {
   return () =>
     existsSync(bin) ? null : `找不到 ${relative(root, bin)}：请先在 ${root} 运行 bun install（--frozen-lockfile）`;
@@ -180,8 +217,10 @@ export function buildGateSteps(root: string, opts: GateStepsOptions = {}): GateS
   return [
     {
       id: 'tsc',
-      title: 'tsc -b',
-      cmd: [tsc, '-b'],
+      title: 'tsc -b --force',
+      // --force：全量重查（约几秒）。增量的 tsc -b 按时间戳与 .tsbuildinfo 判断"已是最新"，依赖的类型变化后
+      // 可能不重查而直接退出 0（假绿）；门禁宁可慢几秒。
+      cmd: [tsc, '-b', '--force'],
       precheck: needBin(root, tsc),
       summarize: (out, code) => {
         const n = parseTsc(out);
@@ -200,14 +239,29 @@ export function buildGateSteps(root: string, opts: GateStepsOptions = {}): GateS
       },
     },
     {
+      id: 'contracts',
+      title: '契约偏移',
+      cmd: [bun, 'run', 'contracts:gen', '--check'],
+      summarize: (out) => {
+        const s = parseContractsCheck(out);
+        if (!s) return '';
+        return s.upToDate
+          ? `与 schema 一致（I32 ${s.i32} 槽，F64 ${s.f64} 槽）`
+          : '生成文件与 schema 不一致或缺失（运行 bun run contracts:gen 并提交）';
+      },
+    },
+    {
       id: 'test',
       title: 'bun test',
       cmd: [bun, 'test', ...testDirs],
+      // CI=true：bun 在 CI 下遇到 .only 直接失败（否则漏删的 test.only 会让同文件其它测试静默不跑）。
+      env: { CI: 'true' },
       precheck: () => (testDirs.length > 0 ? null : `没有 ${TEST_DIRS.join('/、')}/ 目录，无测试可跑`),
       summarize: (out) => {
         const s = parseBunTest(out);
         return s ? formatBunTest(s) : '没有解析到测试摘要';
       },
+      check: checkBunTest,
     },
     {
       id: 'sim:build',
@@ -337,7 +391,8 @@ export const USAGE = [
   '  --profile <档>   透传给 det --kernel（默认不传，由 det 按平台选档）',
   '  --quiet, -q      不实时转发各步输出，只在失败时打印完整输出',
   '',
-  '依次跑 tsc -b、ESLint、bun test（./packages ./tools）、sim:build、sim:scan、det --kernel。',
+  '依次跑 tsc -b --force、ESLint、契约偏移（contracts:gen --check）、bun test（./packages ./tools，CI=true）、',
+  'sim:build、sim:scan、det --kernel。',
   '退出码：0 全部通过；1 有步骤失败或被跳过；2 参数错误。',
 ].join('\n');
 

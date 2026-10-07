@@ -24,7 +24,8 @@ const MERGE_TS = resolve(import.meta.dir, '..', 'merge.ts');
 
 /**
  * 假 gate：noisy.flag → 先打印 300 行；gate-red → 红；a.flag 与 b.flag 同时存在 → 红（模拟"两边各自绿、合起来红"）；
- * sigint.flag 且在主干运行 → 向自己的进程组发 SIGINT（模拟终端里按 Ctrl-C）。
+ * 以下只在主干运行时生效：sigint.flag → 向自己的进程组发 SIGINT（模拟终端里按 Ctrl-C）；hup.flag → 发 SIGHUP
+ * （模拟关终端 / SSH 断线）；kill9.flag → 发 SIGKILL（模拟 kill -9，merge 来不及收尾）。
  */
 const GATE_SH = `#!/bin/sh
 # 假 gate：读标志文件决定退出码
@@ -32,6 +33,8 @@ here=$(basename "$(pwd)")
 echo "假 gate 开始：$here"
 if [ -n "$GATE_LOG" ]; then echo "gate:$here" >> "$GATE_LOG"; fi
 if [ -f sigint.flag ] && [ "$here" != task-t1 ]; then echo "模拟 Ctrl-C"; kill -INT 0; sleep 5; echo "没被中断"; fi
+if [ -f hup.flag ] && [ "$here" != task-t1 ]; then echo "模拟关终端"; kill -HUP 0; sleep 5; echo "没被中断"; fi
+if [ -f kill9.flag ] && [ "$here" != task-t1 ]; then echo "模拟 kill -9"; kill -KILL 0; sleep 5; echo "没被杀掉"; fi
 if [ -f noisy.flag ]; then i=1; while [ $i -le 300 ]; do echo "噪声第 $i 行"; i=$((i+1)); done; fi
 if [ -f gate-red ]; then echo "标志 gate-red 存在 → 红"; exit 1; fi
 if [ -f a.flag ] && [ -f b.flag ]; then echo "a.flag 与 b.flag 同时存在 → 红"; exit 7; fi
@@ -167,7 +170,7 @@ describe.skipIf(!HAS_GIT)('bun run merge（临时 git 仓库）', () => {
     expect(kept).not.toContain('假 gate 开始：task-t1');
   });
 
-  test('主干 gate 红（两边各自绿、合并后标志文件凑齐）→ git reset --hard 回到合并前 sha；回执"已回退（主干 gate 红）"', async () => {
+  test('主干 gate 红（两边各自绿、合并后标志文件凑齐）→ git reset --keep 回到合并前 sha；回执"已回退（主干 gate 红）"', async () => {
     const f = setup();
     put(f.root, 'a.flag', '主干的标志\n');
     const pre = commitAll(f.root, '主干：a.flag');
@@ -196,7 +199,8 @@ describe.skipIf(!HAS_GIT)('bun run merge（临时 git 仓库）', () => {
     expect(text).toContain('| 工作树 gate | 退出码 0');
     expect(text).toContain('| 主干 gate | 退出码 7');
     expect(text).toContain('a.flag 与 b.flag 同时存在 → 红');
-    expect(text).toContain(`已执行 git reset --hard ${pre}`);
+    expect(text).toContain(`已执行 git reset --keep ${pre}`);
+    expect(text).not.toContain('reset --hard');
   });
 
   test('两边改同一行 → 冲突，git merge --abort，主干干净；回执"冲突已中止"', async () => {
@@ -394,7 +398,37 @@ describe.skipIf(!HAS_GIT)('bun run merge（临时 git 仓库）', () => {
     const text = receipt(f);
     expect(text).toContain('**已回退（主干 gate 红）**');
     expect(text).toContain(`已执行 git reset --keep ${f.base}`);
-    expect(text).toContain('改用 git reset --keep 回退以保留它们');
+    expect(text).toContain('git reset --keep 回退时保留它们');
+  });
+
+  test('主干 gate 期间在被合并删除的路径上新建了未跟踪文件 → reset --keep 拒绝覆盖，转"需手工处理"，文件原样保留', async () => {
+    const f = setup();
+    // old.txt 在主干与轨道上都有；轨道 git rm 它并提交，合并后主干上也没了
+    put(f.root, 'old.txt', '旧内容\n');
+    const pre = commitAll(f.root, '主干：old.txt');
+    git(f.wt, 'merge', '-q', '--ff-only', 'main');
+    git(f.wt, 'rm', '-q', 'old.txt');
+    commitAll(f.wt, '轨道：删 old.txt');
+    // 主干 gate 期间，有人在 old.txt 这个路径上写了新内容（未跟踪），然后 gate 红
+    const r = await merge(f, { gateCmd: sideGate('', 'echo 用户内容 > old.txt; exit 1') });
+    expect(r.outcome).toBe('revert-failed');
+    expect(r.exitCode).toBe(OUTCOME_EXIT['revert-failed']);
+    expect(readFileSync(join(f.root, 'old.txt'), 'utf8')).toBe('用户内容\n'); // 没被静默还原成旧内容
+    expect(head(f.root)).toBe(r.mergeSha!);
+    expect(r.finalSha).toBe(r.mergeSha);
+    expect(r.warnings.join('\n')).toContain('old.txt');
+    const text = receipt(f);
+    expect(text).toContain(`**${OUTCOME_TEXT['revert-failed']}**（退出码 7）`);
+    expect(text).toContain(`git reset --keep ${pre} 失败`);
+    expect(text).toContain('old.txt');
+    expect(text).toContain('挪走');
+    expect(text).toContain(`git reset --keep ${pre}`);
+    expect(text).toContain(`git revert -m 1 ${r.mergeSha}`);
+    expect(text).not.toContain('reset --hard');
+    // 照回执的提示：把挡路的文件挪走后再 reset --keep，主干回到合并前
+    git(f.root, 'stash', 'push', '-q', '--include-untracked', '--', 'old.txt');
+    git(f.root, 'reset', '--keep', pre);
+    expect(head(f.root)).toBe(pre);
   });
 
   test('主干 gate 红但其间主干又有新提交 → 不自动回退（需手工处理），新提交保留', async () => {
@@ -470,6 +504,95 @@ describe.skipIf(!HAS_GIT)('bun run merge（临时 git 仓库）', () => {
     expect(text).toContain('（收到 SIGINT），已回退到合并前');
     expect(text).toContain('（合并提交，已回退）');
     expect(text).not.toContain('没被中断');
+  });
+
+  // 关终端 / SSH 断线：SIGHUP 发给整个前台进程组，终端随即消失（写 stdout / stderr 失败）
+  for (const closed of [false, true]) {
+    test(`命令行：主干 gate 期间收到 SIGHUP${closed ? '，且输出管道已关闭' : ''} → 回退并写回执`, async () => {
+      const f = setup();
+      put(f.wt, 'hup.flag', '');
+      commitAll(f.wt, '轨道：hup.flag');
+      const child = spawn(process.execPath, [MERGE_TS, 't1'], {
+        cwd: f.root,
+        env: { ...process.env, GATE_LOG: f.log },
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      let out = '';
+      if (closed) {
+        // 模拟终端已关闭：读端一关，merge 之后的每次写输出都会 EPIPE
+        child.stdout!.destroy();
+        child.stderr!.destroy();
+      } else {
+        child.stdout!.on('data', (d) => void (out += String(d)));
+        child.stderr!.on('data', (d) => void (out += String(d)));
+      }
+      const [code, signal] = await new Promise<[number | null, string | null]>((res) => child.on('close', (c, sg) => res([c, sg])));
+      expect(signal).toBeNull();
+      expect(code).toBe(OUTCOME_EXIT.interrupted);
+      if (!closed) expect(out).toContain('收到 SIGHUP');
+      expect(head(f.root)).toBe(f.base);
+      expect(trackedDirty(f.root)).toBe('');
+      expect(existsSync(join(f.root, 'hup.flag'))).toBe(false);
+      const text = receipt(f);
+      expect(text).toContain('**已中断（未合并）**');
+      expect(text).toContain('（收到 SIGHUP），已回退到合并前');
+      expect(text).not.toContain('没被中断');
+    });
+  }
+
+  test('git merge 之前先写"进行中"回执（含检查与手工回退命令），正常结束时被最终结论覆盖', async () => {
+    const f = setup();
+    put(f.wt, 'feature.txt', '新功能\n');
+    commitAll(f.wt, '轨道：新功能');
+    const snap = join(sb.base, `snap-${seq}.md`);
+    // 主干 gate 运行时（已合并、尚未有结论）把当时的回执拷出来
+    const r = await merge(f, {
+      gateCmd: sideGate('', 'cp review/receipt-t1.md "$SNAP"'),
+      env: { ...process.env, GATE_LOG: f.log, SNAP: snap },
+    });
+    expect(r.outcome).toBe('merged');
+    expect(existsSync(snap)).toBe(true);
+    const during = readFileSync(snap, 'utf8');
+    expect(during).toContain('# 合并回执：t1');
+    expect(during).toContain('| 结论 | **进行中**');
+    expect(during).toContain('主干可能停在未经 gate 的合并提交上');
+    expect(during).toContain(`| 合并前 sha | \`${f.base}\` |`);
+    expect(during).toContain('合并 t1（track/t1）');
+    expect(during).toContain(`git reset --keep ${f.base}`);
+    expect(during).toContain('git revert -m 1');
+    expect(during).toContain('git merge --abort');
+    expect(during).toContain('| 工作树 gate | 退出码 0');
+    const text = receipt(f);
+    expect(text).toContain(`**${OUTCOME_TEXT.merged}**（退出码 0）`);
+    expect(text).not.toContain('**进行中**');
+  });
+
+  test('命令行：主干 gate 期间 merge 被 kill -9 → 回执停在"进行中"，照其中的命令手工回退', async () => {
+    const f = setup();
+    put(f.wt, 'kill9.flag', '');
+    commitAll(f.wt, '轨道：kill9.flag');
+    const child = spawn(process.execPath, [MERGE_TS, 't1', '--quiet'], {
+      cwd: f.root,
+      env: { ...process.env, GATE_LOG: f.log },
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child.stdout!.resume();
+    child.stderr!.resume();
+    const signal = await new Promise<string | null>((res) => child.on('close', (_c, sg) => res(sg)));
+    expect(signal).toBe('SIGKILL');
+    // 主干停在未经 gate 的合并提交上
+    expect(git(f.root, 'log', '-1', '--format=%s')).toBe('合并 t1（track/t1）');
+    expect(git(f.root, 'rev-parse', 'HEAD^1')).toBe(f.base);
+    const text = receipt(f);
+    expect(text).toContain('| 结论 | **进行中**');
+    expect(text).toContain('主干可能停在未经 gate 的合并提交上');
+    expect(text).toContain(`git reset --keep ${f.base}`);
+    expect(text).not.toContain('没被杀掉');
+    git(f.root, 'reset', '--keep', f.base);
+    expect(head(f.root)).toBe(f.base);
+    expect(existsSync(join(f.root, 'kill9.flag'))).toBe(false);
   });
 });
 

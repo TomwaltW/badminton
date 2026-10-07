@@ -4,6 +4,7 @@ import {
   clip,
   formatBunTest,
   parseBunTest,
+  parseContractsCheck,
   parseDet,
   parseEslint,
   parseSimBuild,
@@ -77,6 +78,16 @@ describe('其他解析器', () => {
           "tools/b.ts(1,1): error TS6133: 'x' is declared but its value is never read.\n",
       ),
     ).toBe(2);
+  });
+
+  test('parseContractsCheck：contracts:gen --check 的一致 / 不一致结论行', () => {
+    expect(
+      parseContractsCheck('$ bun packages/contracts/scripts/gen-snapshot-offsets.ts --check\ncontracts:gen --check：packages/contracts/src/gen/snapshot-offsets.ts 与 schema 一致（I32 38 槽，F64 96 槽）\n'),
+    ).toEqual({ upToDate: true, i32: 38, f64: 96 });
+    expect(
+      parseContractsCheck('contracts:gen --check：snapshot-offsets.ts 与 snapshot.schema.ts 不一致或缺失；请运行 bun run contracts:gen 并提交生成文件\nerror: script "contracts:gen" exited with code 1\n'),
+    ).toEqual({ upToDate: false, i32: null, f64: null });
+    expect(parseContractsCheck('error: Script not found "contracts:gen"\n')).toBeNull();
   });
 
   test('parseSimBuild / parseSimScan', () => {

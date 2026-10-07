@@ -84,6 +84,20 @@ export function parseTsc(output: string): number {
   return (text.match(/\berror TS\d+:/g) ?? []).length;
 }
 
+/**
+ * contracts:gen --check 的结论行：
+ *   "contracts:gen --check：<路径> 与 schema 一致（I32 38 槽，F64 96 槽）"
+ *   "contracts:gen --check：<路径> 与 snapshot.schema.ts 不一致或缺失；请运行 bun run contracts:gen 并提交生成文件"
+ * 两种都找不到（例如脚本不存在）返回 null。
+ */
+export function parseContractsCheck(output: string): { upToDate: boolean; i32: number | null; f64: number | null } | null {
+  const text = stripAnsi(output);
+  const ok = lastMatch(text, /^contracts:gen --check：.*与 schema 一致（I32 (\d+) 槽，F64 (\d+) 槽）/m);
+  if (ok) return { upToDate: true, i32: Number(ok[1]), f64: Number(ok[2]) };
+  if (lastMatch(text, /^contracts:gen --check：.*不一致或缺失/m)) return { upToDate: false, i32: null, f64: null };
+  return null;
+}
+
 /** sim:build 的 "[sim:build] packages/sim/dist/sim.js  12345 字节  simVer=0123abcd"。 */
 export function parseSimBuild(output: string): { simVer: string; bytes: number } | null {
   const text = stripAnsi(output);

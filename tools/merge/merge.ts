@@ -10,13 +10,17 @@
  * 流程：
  *   1. 轨道工作树里：有 bun.lock 则先 bun install --frozen-lockfile，再 bun run gate → 红则不合并；
  *   2. 主干：再查一次主干（工作树 gate 期间主干若被提交或改脏，就不合并——否则回退时会连带抹掉别人的工作）；
- *      git merge --no-ff --no-edit -m "合并 <轨>（<分支>）" <gate 过的那个提交>；冲突则 git merge --abort；
- *   3. 主干：（合并改了 bun.lock 则先 bun install --frozen-lockfile）bun run gate → 红则 git reset --hard <合并前 sha>。
- *      前置检查保证了主干干净，所以 reset 只撤掉本次合并。保险：主干 gate 期间若主干又有新提交，不自动回退
- *      （需手工处理）；若出现了未提交的已跟踪改动，改用 git reset --keep 回退以保留它们。
+ *      先写一份"进行中"回执（见下），再 git merge --no-ff --no-edit -m "合并 <轨>（<分支>）" <gate 过的那个提交>；
+ *      冲突则 git merge --abort；
+ *   3. 主干：（合并改了 bun.lock 则先 bun install --frozen-lockfile）bun run gate → 红则 git reset --keep <合并前 sha>。
+ *      一律用 --keep 而不是 --hard：主干 gate 期间别人可能改了已跟踪文件，或在被本次合并删除 / 新增的路径上建了
+ *      未跟踪文件，--hard 会静默覆盖它们；--keep 遇到这种挡路的文件就拒绝执行，转为"未能自动回退（需手工处理）"，
+ *      回执里给出挡路的文件与手工回退命令。保险：主干 gate 期间若主干又有新提交，也不自动回退（需手工处理）。
  * 无论结果，把完整过程写到 review/receipt-<轨>.md（时间、轨道、分支、合并前后 sha、两次 gate 的退出码与输出尾部、结论）。
- * 命令行运行时 Ctrl-C（SIGINT / SIGTERM）不会让主干停在未经 gate 的合并上：等当前子进程退出后不再合并、
- * 已合并则回退，并照常写回执。
+ * git merge 之前先写一份结论为"进行中"的回执，正常结束时被最终结论覆盖；merge 若被 kill -9、断电等无法拦截的方式
+ * 中断，留下的就是这一份——说明主干可能停在未经 gate 的合并提交上，并给出检查与手工回退命令。
+ * 命令行运行时 Ctrl-C（SIGINT）、SIGTERM 与 SIGHUP（关终端 / SSH 断线）都不会让主干停在未经 gate 的合并上：
+ * 等当前子进程退出后不再合并、已合并则回退，并照常写回执；终端已关闭时写输出失败也不影响收尾。
  *
  * 退出码：0 已合并；1 未合并（工作树 gate 红）；2 拒绝执行（参数或前置检查）；3 冲突已中止；
  *         4 已回退（主干 gate 红）；5 未合并（git merge 因冲突以外的原因失败）；6 已中断（未合并）；
@@ -26,7 +30,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { bunBin, formatCmd, formatDuration, runCommand, stripAnsi, tailLines } from '../gate/run';
 
 export type MergeOutcome =
@@ -66,6 +70,9 @@ export const TRACK_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** 回执里每段输出最多保留的行数。 */
 export const RECEIPT_TAIL_LINES = 200;
+
+/** 子进程非 0 退出后等待挂起的信号处理函数执行的时间（毫秒），见 runMerge 里的 run()。 */
+const SIGNAL_SETTLE_MS = 100;
 
 export interface WorktreeEntry {
   path: string;
@@ -185,7 +192,7 @@ export interface MergeOptions {
   now?: () => Date;
   /** 回执里每段输出保留的行数，默认 200。 */
   tailLines?: number;
-  /** 是否已收到中断信号（返回信号名，如 SIGINT；未中断返回 null）。命令行入口据 SIGINT / SIGTERM 设置。 */
+  /** 是否已收到中断信号（返回信号名，如 SIGINT；未中断返回 null）。命令行入口据 SIGINT / SIGTERM / SIGHUP 设置。 */
   interrupted?: () => string | null;
 }
 
@@ -257,6 +264,9 @@ export async function runMerge(opts: MergeOptions): Promise<MergeReport> {
     const shownDir = report.mainRoot ? relative(report.mainRoot, dir) || '.' : dir;
     log(`${label}：$ ${formatCmd(cmd)}（cwd ${shownDir}）`);
     const r = await runCommand(cmd, { cwd: dir, env, onOutput: echo ? (s) => write(s) : undefined });
+    // Ctrl-C / 关终端的信号发给整个进程组：子进程随之退出，而本进程的信号处理函数可能还排在事件循环里。
+    // 子进程非 0 退出时让一让事件循环，免得接下来的 signalled() 读到旧状态、把"已中断"误判成"gate 红"。
+    if (r.exitCode !== 0 && opts.interrupted) await new Promise((res) => setTimeout(res, SIGNAL_SETTLE_MS));
     if (echo && r.output.length > 0 && !r.output.endsWith('\n')) write('\n');
     const rec: CmdRecord = { label, cmd, cwd: dir, exitCode: r.exitCode, durationMs: r.durationMs, output: r.output };
     log(`${label}：退出码 ${r.exitCode}（${formatDuration(r.durationMs)}）`);
@@ -283,8 +293,10 @@ export async function runMerge(opts: MergeOptions): Promise<MergeReport> {
 
   /**
    * 撤掉本次合并，返回主干是否已回到合并前 sha。
-   * 只在主干仍停在本次合并提交上时回退（gate 期间有人又提交了就不动，免得 reset 抹掉那些提交）；
-   * 有未提交的已跟踪改动时用 git reset --keep（保留与本次合并无关的改动；有冲突则拒绝），否则按计划用 --hard。
+   * 只在主干仍停在本次合并提交上时回退（gate 期间有人又提交了就不动，免得 reset 抹掉那些提交）。
+   * 一律用 git reset --keep：它保留与本次合并无关的未提交改动；本次合并动过的路径上若有未提交改动或挡路的
+   * 未跟踪文件（例如 gate 期间在被合并删除的路径上新建的文件），它拒绝执行而不是覆盖——这时转"需手工处理"。
+   * （--hard 会把这些文件静默覆盖成合并前的内容。）
    */
   const revertMerge = (): boolean => {
     const root = report.mainRoot!;
@@ -301,13 +313,19 @@ export async function runMerge(opts: MergeOptions): Promise<MergeReport> {
       return false;
     }
     const dirty = git(root, ['status', '--porcelain', '--untracked-files=no']).stdout.trim();
-    const mode = dirty.length > 0 ? '--keep' : '--hard';
-    if (dirty.length > 0) warn(`主干在 gate 期间出现了未提交的已跟踪改动，改用 git reset --keep 回退以保留它们：\n${dirty}`);
-    const rs = git(root, ['reset', mode, pre]);
-    log(rs.ok ? `已执行 git reset ${mode} ${pre}` : `git reset ${mode} ${pre} 失败：${rs.stderr.trim()}`);
+    if (dirty.length > 0) warn(`主干在 gate 期间出现了未提交的已跟踪改动，git reset --keep 回退时保留它们：\n${dirty}`);
+    const rs = git(root, ['reset', '--keep', pre]);
+    const why = `${rs.stdout}${rs.stderr}`.trim();
+    log(rs.ok ? `已执行 git reset --keep ${pre}` : `git reset --keep ${pre} 失败（退出码 ${rs.status}）：\n${why}`);
     const now = git(root, ['rev-parse', 'HEAD']).stdout.trim();
     if (now !== pre) {
-      warn(`回退没有完成：主干 HEAD 是 ${now}，不是合并前的 ${pre}；请手工处理`);
+      warn(
+        `回退没有完成：主干 HEAD 是 ${now}，不是合并前的 ${pre}。git reset --keep 被拒绝——通常是 gate 期间` +
+          `在本次合并动过的路径上出现了未提交改动或未跟踪文件，--keep 不会覆盖它们（git 的说明如下）：\n` +
+          `${why || '（git 没有给出说明）'}\n` +
+          `手工处理：先 git status 查看，把上面列出的文件挪走（或提交到别处）后运行 git reset --keep ${pre}；` +
+          `若主干上已经有人接着提交，改用 git revert -m 1 ${merged}`,
+      );
       return false;
     }
     return true;
@@ -368,6 +386,23 @@ export async function runMerge(opts: MergeOptions): Promise<MergeReport> {
     );
   };
 
+  /** 回执路径：轨道名不合法或找不到仓库时为 null（路径不可信或无处可写）。 */
+  const receiptPath = (): string | null =>
+    report.mainRoot && TRACK_RE.test(opts.track) ? join(report.mainRoot, 'review', `receipt-${opts.track}.md`) : null;
+  /** 写回执；成功返回路径，失败只提示（不影响合并流程）。 */
+  const writeReceipt = (text: string): string | null => {
+    const path = receiptPath();
+    if (!path) return null;
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, text);
+      return path;
+    } catch (e) {
+      write(`[merge] 写回执失败：${(e as Error).message}\n`);
+      return null;
+    }
+  };
+
   const flow = async (): Promise<void> => {
     try {
       preflight();
@@ -426,6 +461,15 @@ export async function runMerge(opts: MergeOptions): Promise<MergeReport> {
       return;
     }
     const msg = `合并 ${opts.track}（${report.branch}）`;
+    // 先写"进行中"回执：merge 若在合并之后被 kill -9 等无法拦截的方式中断，留下的回执会指出主干可能停在
+    // 未经 gate 的合并提交上，并给出检查与手工回退命令；正常结束时被最终结论覆盖。
+    const pending = receiptPath();
+    if (pending) {
+      log(`写"进行中"回执 ${relative(mainRoot, pending)}（正常结束时覆盖为最终结论）`);
+      if (!writeReceipt(renderInProgressReceipt(report, msg, opts.tailLines ?? RECEIPT_TAIL_LINES))) {
+        warn('"进行中"回执没有写成：merge 若被强行中断，将没有回执提示主干可能停在未经 gate 的合并提交上');
+      }
+    }
     const mergeArgs = ['merge', '--no-ff', '--no-edit', '-m', msg, branchSha];
     log(`主干合并：$ git ${formatCmd(mergeArgs)}`);
     const m = git(mainRoot, mergeArgs);
@@ -507,18 +551,11 @@ export async function runMerge(opts: MergeOptions): Promise<MergeReport> {
   report.endedAt = now();
   log(`结论：${OUTCOME_TEXT[report.outcome]}——${report.reason}`);
 
-  // 回执写到主工作树的 review/ 下；轨道名不合法或找不到仓库时不写（路径不可信或无处可写）。
-  if (report.mainRoot && TRACK_RE.test(opts.track)) {
-    try {
-      const dir = join(report.mainRoot, 'review');
-      mkdirSync(dir, { recursive: true });
-      const path = join(dir, `receipt-${opts.track}.md`);
-      writeFileSync(path, renderReceipt(report, opts.tailLines ?? RECEIPT_TAIL_LINES));
-      report.receiptPath = path;
-      write(`[merge] 回执：${relative(cwd, path) || path}\n`);
-    } catch (e) {
-      write(`[merge] 写回执失败：${(e as Error).message}\n`);
-    }
+  // 回执写到主工作树的 review/ 下（覆盖"进行中"回执）；轨道名不合法或找不到仓库时不写（路径不可信或无处可写）。
+  const path = writeReceipt(renderReceipt(report, opts.tailLines ?? RECEIPT_TAIL_LINES));
+  if (path) {
+    report.receiptPath = path;
+    write(`[merge] 回执：${relative(cwd, path) || path}\n`);
   }
   return report;
 }
@@ -574,6 +611,80 @@ function gateCell(rec: CmdRecord | null): string {
   return rec ? `退出码 ${rec.exitCode}（${formatDuration(rec.durationMs)}）` : '未运行';
 }
 
+/** "## 过程"一节：编号步骤，多行细节放进代码围栏。 */
+function stepsSection(r: MergeReport): string[] {
+  const lines = ['## 过程', ''];
+  r.steps.forEach((s, i) => {
+    const [first, ...rest] = s.split('\n');
+    lines.push(`${i + 1}. ${first}`);
+    if (rest.length > 0) {
+      const body = rest.join('\n');
+      const fence = fenceFor(body);
+      lines.push('', `   ${fence}text`, ...rest.map((l) => `   ${l}`), `   ${fence}`, '');
+    }
+  });
+  lines.push('');
+  return lines;
+}
+
+/** 依赖安装与两次 gate 的输出尾部。 */
+function outputSections(r: MergeReport, tailN: number): string[] {
+  const lines: string[] = [];
+  for (const ins of r.installs) lines.push(...outputBlock(`${ins.label} 输出`, ins, r.mainRoot, tailN));
+  if (r.worktreeGate) lines.push(...outputBlock('工作树 gate 输出', r.worktreeGate, r.mainRoot, tailN));
+  if (r.mainGate) lines.push(...outputBlock('主干 gate 输出', r.mainGate, r.mainRoot, tailN));
+  return lines;
+}
+
+function finishReceipt(lines: string[]): string {
+  return `${lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()}\n`;
+}
+
+/**
+ * "进行中"回执：git merge 之前写出，正常结束（含回退、中断）时被最终结论覆盖。
+ * 留在磁盘上说明 merge 被强行中断，主干可能停在未经 gate 的合并提交上；这里给出检查与手工回退命令。
+ */
+export function renderInProgressReceipt(r: MergeReport, mergeMessage: string, tailN: number = RECEIPT_TAIL_LINES): string {
+  const root = r.mainRoot;
+  const trackDir = r.trackPath && root ? relative(root, r.trackPath) : r.trackPath;
+  const pre = r.preSha ?? '<合并前 sha>';
+  const lines: string[] = [
+    `# 合并回执：${r.track}`,
+    '',
+    '由 `bun run merge` 生成（计划 4.2）。',
+    '',
+    '| 项 | 值 |',
+    '|---|---|',
+    '| 结论 | **进行中**（merge 尚未结束；正常结束时这份回执会被最终结论覆盖） |',
+    '| 说明 | 若 merge 已不在运行而回执仍是这份，说明它被强行中断，主干可能停在未经 gate 的合并提交上（处理办法见下） |',
+    `| 轨道 | ${r.track}（工作树 ${code(trackDir)}） |`,
+    `| 分支 | ${code(r.branch)} @ ${code(r.branchSha)} |`,
+    `| 主干 | ${code(r.mainBranch)} |`,
+    `| 合并前 sha | ${code(r.preSha)} |`,
+    `| 合并提交信息 | ${mergeMessage} |`,
+    `| 开始 | ${formatTime(r.startedAt)} |`,
+    `| 工作树 gate | ${gateCell(r.worktreeGate)} |`,
+    '| 主干 gate | 未运行 |',
+    '',
+    '## 若 merge 已不在运行而回执仍是这份',
+    '',
+    `\`bun run merge\` 被 kill -9、断电、容器回收等无法拦截的方式中断了，**主干可能停在未经 gate 的合并提交上**。` +
+      `在主工作树 ${code(root)} 里：`,
+    '',
+    `1. 确认 merge 已退出：\`pgrep -af "merge.ts ${r.track}"\` 没有输出。`,
+    '2. 检查主干：`git log -1 --format="%H %P %s"` 与 `git status`。',
+    `   - HEAD 仍是 \`${pre}\`：没有合并，主干未动；若 \`git rev-parse -q --verify MERGE_HEAD\` 有输出（合并停在冲突里），运行 \`git merge --abort\`。`,
+    `   - HEAD 是提交信息为"${mergeMessage}"、第一个父提交为 \`${pre}\` 的合并提交：它没有经过主干 gate，回退：` +
+      `\`git reset --keep ${pre}\`（不会覆盖未提交改动与未跟踪文件；被拒绝时先把它列出的文件挪走再运行）。`,
+    '   - 该合并提交之后又有别的提交：不要 reset，用 `git revert -m 1 <合并提交 sha>` 撤掉合并。',
+    `3. 处理完后重新运行 \`bun run merge ${r.track}\`（会覆盖这份回执）。`,
+    '',
+    ...stepsSection(r),
+    ...outputSections(r, tailN),
+  ];
+  return finishReceipt(lines);
+}
+
 /** 回执 Markdown（中文）。 */
 export function renderReceipt(r: MergeReport, tailN: number = RECEIPT_TAIL_LINES): string {
   const root = r.mainRoot;
@@ -598,19 +709,8 @@ export function renderReceipt(r: MergeReport, tailN: number = RECEIPT_TAIL_LINES
     `| 工作树 gate | ${gateCell(r.worktreeGate)} |`,
     `| 主干 gate | ${gateCell(r.mainGate)} |`,
     '',
-    '## 过程',
-    '',
+    ...stepsSection(r),
   ];
-  r.steps.forEach((s, i) => {
-    const [first, ...rest] = s.split('\n');
-    lines.push(`${i + 1}. ${first}`);
-    if (rest.length > 0) {
-      const body = rest.join('\n');
-      const fence = fenceFor(body);
-      lines.push('', `   ${fence}text`, ...rest.map((l) => `   ${l}`), `   ${fence}`, '');
-    }
-  });
-  lines.push('');
   if (r.conflicts.length > 0) {
     lines.push('## 冲突文件', '', ...r.conflicts.map((f) => `- \`${f}\``), '');
   }
@@ -622,10 +722,8 @@ export function renderReceipt(r: MergeReport, tailN: number = RECEIPT_TAIL_LINES
     }
     lines.push('');
   }
-  for (const ins of r.installs) lines.push(...outputBlock(`${ins.label} 输出`, ins, root, tailN));
-  if (r.worktreeGate) lines.push(...outputBlock('工作树 gate 输出', r.worktreeGate, root, tailN));
-  if (r.mainGate) lines.push(...outputBlock('主干 gate 输出', r.mainGate, root, tailN));
-  return `${lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd()}\n`;
+  lines.push(...outputSections(r, tailN));
+  return finishReceipt(lines);
 }
 
 export const USAGE = [
@@ -635,10 +733,14 @@ export const USAGE = [
   '  --quiet, -q  不实时转发 gate 输出（回执里照样有）',
   '',
   '在主工作树里运行：轨道工作树 gate → git merge --no-ff → 主干 gate → 红了回退；回执写到 review/receipt-<轨>.md。',
-  'Ctrl-C：等当前步骤结束后收尾（不再合并；已合并则回退）并写回执。',
+  'Ctrl-C / SIGTERM / SIGHUP（关终端）：等当前步骤结束后收尾（不再合并；已合并则回退）并写回执。',
+  'git merge 之前先写"进行中"回执；merge 被 kill -9 等强行中断时留下的就是它，其中有检查与手工回退命令。',
   '退出码：0 已合并；1 未合并（工作树 gate 红）；2 拒绝执行；3 冲突已中止；4 已回退（主干 gate 红）；5 git merge 失败；',
   '        6 已中断（未合并）；7 主干 gate 红但未能自动回退（需手工处理）。',
 ].join('\n');
+
+/** 命令行入口拦截的信号：收到后不立即退出，而是收尾（不再合并；已合并则回退）并写回执。 */
+export const INTERRUPT_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const;
 
 export async function main(argv: readonly string[]): Promise<number> {
   const quiet = argv.includes('--quiet') || argv.includes('-q');
@@ -652,22 +754,35 @@ export async function main(argv: readonly string[]): Promise<number> {
     console.error(`[merge] ${unknown.length > 0 ? `未知参数 ${unknown.join(' ')}` : '需要且只需要一个轨道名'}\n\n${USAGE}`);
     return 2;
   }
-  // Ctrl-C 会发给整个前台进程组：gate 子进程随之退出（非 0），本进程不退出，而是按"工作树 gate 未过 / 主干 gate 红"
-  // 收尾——不合并或回退，并写回执。否则主干可能停在一个没跑完 gate 的合并提交上，且没有回执。
+  // Ctrl-C（SIGINT）与关终端 / SSH 断线（SIGHUP）都会发给整个前台进程组：gate 子进程随之退出（非 0），本进程
+  // 不退出，而是按"工作树 gate 未过 / 主干 gate 红"收尾——不合并或回退，并写回执。否则主干可能停在一个没跑完
+  // gate 的合并提交上，且没有回执。SIGHUP 之后终端已经没了，写 stdout / stderr 会出错（EIO / EPIPE），
+  // 所以输出一律尽力而为：同步异常 try/catch，异步的 'error' 事件吞掉，都不影响收尾。吞错的监听器不移除：
+  // 收尾之后到 process.exit 之间仍可能冒出写失败事件，没有监听器时 bun 会以退出码 1 结束，盖掉真正的退出码。
+  const swallow = () => {};
+  process.stdout.on('error', swallow);
+  process.stderr.on('error', swallow);
+  const safeWrite = (stream: NodeJS.WriteStream) => (s: string) => {
+    try {
+      stream.write(s);
+    } catch {
+      // 终端可能已关闭
+    }
+  };
+  const out = safeWrite(process.stdout);
+  const err = safeWrite(process.stderr);
   let interrupted: string | null = null;
   const onSignal = (sig: NodeJS.Signals) => {
     if (interrupted !== null) return;
     interrupted = sig;
-    process.stderr.write(`\n[merge] 收到 ${sig}：等当前步骤结束后收尾（不再合并；已合并则回退）并写回执……\n`);
+    err(`\n[merge] 收到 ${sig}：等当前步骤结束后收尾（不再合并；已合并则回退）并写回执……\n`);
   };
-  process.on('SIGINT', onSignal);
-  process.on('SIGTERM', onSignal);
+  for (const sig of INTERRUPT_SIGNALS) process.on(sig, onSignal);
   try {
-    const report = await runMerge({ track: rest[0]!, echo: !quiet, interrupted: () => interrupted });
+    const report = await runMerge({ track: rest[0]!, echo: !quiet, write: out, interrupted: () => interrupted });
     return report.exitCode;
   } finally {
-    process.off('SIGINT', onSignal);
-    process.off('SIGTERM', onSignal);
+    for (const sig of INTERRUPT_SIGNALS) process.off(sig, onSignal);
   }
 }
 
