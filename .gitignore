@@ -8,3 +8,7 @@ client/temp/
 client/local/
 client/build/
 client/profiles/
+# 构建产物（由 bun run sim:build / tsc -b 生成）
+.tsbuild/
+packages/sim/dist/
+tools/wx-selftest/sim.js
