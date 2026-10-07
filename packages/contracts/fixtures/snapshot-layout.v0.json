@@ -1,0 +1,215 @@
+{
+  "comment": "快照布局基线（契约草案 v0）。只许追加：现有各项的名字、偏移、count 不得改变，新字段只能出现在两张表末尾。",
+  "schemaVer": 0,
+  "i32Len": 38,
+  "f64Len": 96,
+  "i32": [
+    {
+      "name": "MAGIC",
+      "offset": 0,
+      "count": 1
+    },
+    {
+      "name": "SCHEMA_VER",
+      "offset": 1,
+      "count": 1
+    },
+    {
+      "name": "SIM_VER",
+      "offset": 2,
+      "count": 1
+    },
+    {
+      "name": "CONTENT_HASH",
+      "offset": 3,
+      "count": 1
+    },
+    {
+      "name": "TICK",
+      "offset": 4,
+      "count": 1
+    },
+    {
+      "name": "RNG_AI_A",
+      "offset": 5,
+      "count": 1
+    },
+    {
+      "name": "RNG_AI_B",
+      "offset": 6,
+      "count": 1
+    },
+    {
+      "name": "RNG_SCATTER",
+      "offset": 7,
+      "count": 1
+    },
+    {
+      "name": "PHASE",
+      "offset": 8,
+      "count": 1
+    },
+    {
+      "name": "SCORE",
+      "offset": 9,
+      "count": 2
+    },
+    {
+      "name": "GAMES",
+      "offset": 11,
+      "count": 2
+    },
+    {
+      "name": "SERVER",
+      "offset": 13,
+      "count": 1
+    },
+    {
+      "name": "HITSTOP_LEFT",
+      "offset": 14,
+      "count": 1
+    },
+    {
+      "name": "POS_RING_HEAD",
+      "offset": 15,
+      "count": 1
+    },
+    {
+      "name": "MATCH_CFG",
+      "offset": 16,
+      "count": 22
+    }
+  ],
+  "f64": [
+    {
+      "name": "BALL_POS",
+      "offset": 0,
+      "count": 3
+    },
+    {
+      "name": "BALL_VEL",
+      "offset": 3,
+      "count": 3
+    },
+    {
+      "name": "BALL_G",
+      "offset": 6,
+      "count": 1
+    },
+    {
+      "name": "BALL_K",
+      "offset": 7,
+      "count": 1
+    },
+    {
+      "name": "BALL_ALPHA",
+      "offset": 8,
+      "count": 1
+    },
+    {
+      "name": "BALL_LAUNCH_POS",
+      "offset": 9,
+      "count": 3
+    },
+    {
+      "name": "BALL_LAUNCH_VEL",
+      "offset": 12,
+      "count": 3
+    },
+    {
+      "name": "BALL_LAUNCH_U",
+      "offset": 15,
+      "count": 1
+    },
+    {
+      "name": "P0_POS",
+      "offset": 16,
+      "count": 3
+    },
+    {
+      "name": "P1_POS",
+      "offset": 19,
+      "count": 3
+    },
+    {
+      "name": "P0_VEL",
+      "offset": 22,
+      "count": 3
+    },
+    {
+      "name": "P1_VEL",
+      "offset": 25,
+      "count": 3
+    },
+    {
+      "name": "P0_STAMINA",
+      "offset": 28,
+      "count": 1
+    },
+    {
+      "name": "P1_STAMINA",
+      "offset": 29,
+      "count": 1
+    },
+    {
+      "name": "P0_FOCUS",
+      "offset": 30,
+      "count": 1
+    },
+    {
+      "name": "P1_FOCUS",
+      "offset": 31,
+      "count": 1
+    },
+    {
+      "name": "P0_POS_RING",
+      "offset": 32,
+      "count": 24
+    },
+    {
+      "name": "P1_POS_RING",
+      "offset": 56,
+      "count": 24
+    },
+    {
+      "name": "P0_AI_REACT_U",
+      "offset": 80,
+      "count": 1
+    },
+    {
+      "name": "P1_AI_REACT_U",
+      "offset": 81,
+      "count": 1
+    },
+    {
+      "name": "P0_AI_EST",
+      "offset": 82,
+      "count": 2
+    },
+    {
+      "name": "P1_AI_EST",
+      "offset": 84,
+      "count": 2
+    },
+    {
+      "name": "P0_AI_HABIT_HEAD",
+      "offset": 86,
+      "count": 1
+    },
+    {
+      "name": "P1_AI_HABIT_HEAD",
+      "offset": 87,
+      "count": 1
+    },
+    {
+      "name": "P0_AI_HABIT",
+      "offset": 88,
+      "count": 4
+    },
+    {
+      "name": "P1_AI_HABIT",
+      "offset": 92,
+      "count": 4
+    }
+  ]
+}

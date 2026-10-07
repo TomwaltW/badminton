@@ -1,0 +1,96 @@
+{
+  "comment": "InputEvent 16 字节小端布局的黄金样例（契约草案 v0）。hex 为编码后的 16 字节。",
+  "bytesPerEvent": 16,
+  "events": [
+    {
+      "name": "全部取下界",
+      "event": {
+        "tick": 0,
+        "offMs": -128,
+        "player": 0,
+        "kind": 1,
+        "tx": -32768,
+        "tz": -32768,
+        "dx": -32768,
+        "dy": -32768,
+        "durMs": 0
+      },
+      "hex": "00000000800100800080008000800000"
+    },
+    {
+      "name": "全部取上界",
+      "event": {
+        "tick": 4294967295,
+        "offMs": 127,
+        "player": 1,
+        "kind": 4,
+        "tx": 32767,
+        "tz": 32767,
+        "dx": 32767,
+        "dy": 32767,
+        "durMs": 65535
+      },
+      "hex": "ffffffff7f84ff7fff7fff7fff7fffff"
+    },
+    {
+      "name": "典型松手（杀球）",
+      "event": {
+        "tick": 1234,
+        "offMs": -17,
+        "player": 0,
+        "kind": 2,
+        "tx": 250,
+        "tz": -130,
+        "dx": 120,
+        "dy": -480,
+        "durMs": 180
+      },
+      "hex": "d2040000ef02fa007eff780020feb400"
+    },
+    {
+      "name": "预判走位",
+      "event": {
+        "tick": 30,
+        "offMs": 0,
+        "player": 1,
+        "kind": 3,
+        "tx": -300,
+        "tz": 200,
+        "dx": 0,
+        "dy": 0,
+        "durMs": 0
+      },
+      "hex": "1e0000000083d4fec800000000000000"
+    },
+    {
+      "name": "tick 跨过 2^31（u32 不是 i32）",
+      "event": {
+        "tick": 2147483648,
+        "offMs": -1,
+        "player": 1,
+        "kind": 1,
+        "tx": -1,
+        "tz": 1,
+        "dx": -2,
+        "dy": 2,
+        "durMs": 256
+      },
+      "hex": "00000080ff81ffff0100feff02000001"
+    },
+    {
+      "name": "全零之外的最小记录（kind 0 非法，DOWN = 1）",
+      "event": {
+        "tick": 0,
+        "offMs": 0,
+        "player": 0,
+        "kind": 1,
+        "tx": 0,
+        "tz": 0,
+        "dx": 0,
+        "dy": 0,
+        "durMs": 0
+      },
+      "hex": "00000000000100000000000000000000"
+    }
+  ]
+}

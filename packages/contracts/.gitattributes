@@ -1,0 +1,2 @@
+# 回放夹具是二进制：不做换行转换、不按文本 diff。
+fixtures/*.bmrp binary
