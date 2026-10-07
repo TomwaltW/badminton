@@ -1,0 +1,8 @@
+{
+  "name": "@badminton/sim",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/api.ts"
+  }
+}

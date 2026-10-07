@@ -1,0 +1,18 @@
+{
+  "//": "仅供 tools/sim/build.ts 生成单文件 dist/sim.d.ts（声明全局 BadmintonSim）；不参与 tsc -b。",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "composite": false,
+    "incremental": false,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "module": "AMD",
+    "moduleResolution": "node10",
+    "verbatimModuleSyntax": false,
+    "isolatedModules": false,
+    "rootDir": "src",
+    "outFile": "dist/sim.d.ts",
+    "tsBuildInfoFile": null
+  },
+  "include": ["src/index.ts"]
+}
