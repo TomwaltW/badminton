@@ -30,7 +30,21 @@ export interface Snapshot {
 export const SNAPSHOT_MAGIC = 0x53534d42;
 /** 快照布局版本；草案阶段为 0。 */
 export const SNAPSHOT_SCHEMA_VER = 0;
-/** 每名球员保留最近 8 个 tick 的位置（计划 2.4：t* 通常已落后 1 tick + 最多 160 ms）。 */
+/**
+ * 每名球员保留最近 8 个 tick 的位置（计划 2.5 原文"最近 8 个 tick"；2.4：可达性在 t* 用过去的位置判定，
+ * t* 通常已落后 1 tick + 最多 160 ms）。
+ *
+ * 待 10-11 审定（v0 暂保持 8，本次不改布局）：按契约允许的最坏情况——打戳早于消费 tick 起点 128 ms
+ * （offMs = INPUT_OFFSET_MIN_MS = −128）且误差 e = 打戳 − t* = +160 ms（判定外窗）——t* 比消费 tick 起点早
+ * 128 + 160 = 288 ms ≈ 8.64 tick（1 tick = 33.3 ms），而 8 槽环加当前位置最多回溯 8 tick（266.7 ms），够不着；
+ * 新手窗口若放大外窗还更多（如 windowScalePermille = 1300：外窗 208 ms → 336 ms ≈ 10.1 tick）。两个选项：
+ *   (1) 把 POS_RING_LEN 提到 10–12：POS_RING 不在表尾，改 count 是破坏性变更，要 bump SNAPSHOT_SCHEMA_VER、
+ *       重新生成 gen/snapshot-offsets.ts 与 fixtures/snapshot-layout.v0.json 基线；
+ *   (2) 在 t* 事件发生时把双方位置记进快照（新字段追加在 F64 表尾），可达性判定改读这份记录，不再回溯位置环。
+ * 延迟校准滑杆 PlayerCfg.inputOffsetMs 的 ±150 ms（match-cfg.ts 的 PLAYER_INPUT_OFFSET_MS_MIN/MAX）在量化前
+ * 从打戳里扣除，会把打戳整体前后平移最多 150 ms：正向时单这一项就可能越过 offMs 下限 −128（输入被丢弃）并加深
+ * t* 回溯，负向时本地输入可能出现 offMs > 0。所以 ±150 与 −128 的关系要和本环长度一起审定。
+ */
 export const POS_RING_LEN = 8;
 
 /** 字段定义。 */
@@ -68,7 +82,18 @@ export interface SnapshotLayout {
 export const SNAPSHOT_I32_FIELDS: readonly SnapshotFieldDef[] = [
   { name: 'MAGIC', count: 1, doc: "魔数 'BMSS'（小端 int32 = SNAPSHOT_MAGIC）" },
   { name: 'SCHEMA_VER', count: 1, doc: '快照布局版本（SNAPSHOT_SCHEMA_VER）' },
-  { name: 'SIM_VER', count: 1, doc: 'simVer：dist/sim.js 字节的 FNV-1a（u32 按位存）' },
+  // SIM_VER 待 10-11 审定（本次不改布局）：sim.js 无法知道自身字节的 FNV（simVer 只在构建产物 dist/sim.version 里），
+  // CreateSim 也不接收 simVer，可 api.ts 里 hash() 的定义（save() 写出的 i32 全部 + f64 全部）包含这一槽。可选方案：
+  //   (a) 给 CreateSim 加 simVer 参数，宿主从 sim.version 读出传入，sim 在 save 时原样写入；
+  //   (b) 宿主在 save 之后补写这一槽，且 hash() 不计入它（否则 sim 内部算的哈希与补写后的快照对不上）；
+  //   (c) 从快照删去这一槽，simVer 只留在 BMRP 头（删字段是破坏性变更：bump SNAPSHOT_SCHEMA_VER、重新生成偏移与基线）。
+  // hash() 是否应整体跳过身份头（MAGIC .. CONTENT_HASH，一局内恒定）同样待审定：计入则同一局面在不同
+  // simVer / contentHash 下哈希不同，跳过则哈希只反映对局状态。
+  {
+    name: 'SIM_VER',
+    count: 1,
+    doc: 'simVer：dist/sim.js 字节的 FNV-1a（u32 按位存）。待 10-11 审定：sim 无从得知自身 simVer，由谁写入、hash() 是否计入未定（方案见 snapshot.schema.ts 本字段旁注释）',
+  },
   { name: 'CONTENT_HASH', count: 1, doc: 'contentHash：数值包规范化 JSON 的 FNV-1a（u32 按位存）' },
   { name: 'TICK', count: 1, doc: '已步进的 tick 数 = 下一个要消费的 tick 号' },
   { name: 'RNG_AI_A', count: 1, doc: 'xorshift32 状态：AI-A 流（与 RNG_AI_B、RNG_SCATTER 相邻，顺序同 sim/rng.ts）' },
@@ -103,7 +128,7 @@ export const SNAPSHOT_F64_FIELDS: readonly SnapshotFieldDef[] = [
     name: 'POS_RING',
     count: POS_RING_LEN * 3,
     perPlayer: true,
-    doc: '最近 8 个 tick 的位置环：槽 s 的 x, y, z 在 3s .. 3s+2；最新槽号见 I32 POS_RING_HEAD',
+    doc: '最近 8 个 tick 的位置环：槽 s 的 x, y, z 在 3s .. 3s+2；最新槽号见 I32 POS_RING_HEAD（环长待 10-11 审定，见 POS_RING_LEN 注释）',
   },
   // 只许追加的 AI 状态块（v0 最小集合）。
   { name: 'AI_REACT_U', count: 1, perPlayer: true, doc: 'AI 反应计时：距"看到"来球还剩的 u（hit-stop 期间照走）' },

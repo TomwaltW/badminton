@@ -14,12 +14,13 @@
  *   [12..13] dy     i16  ‰屏宽
  *   [14..15] durMs  u16  按下到松手
  *
- * 编码前逐字段检查范围，越界一律抛 RangeError（中文信息），绝不静默回绕或截断。
+ * 编码前逐字段检查范围，越界一律抛 RangeError（中文信息），绝不静默回绕或截断；
+ * 整数字段（含 player）取 −0 也算不合法（读回会成 +0，见 api.ts 的 NEG_ZERO_HINT）。
  * 解码时 kind 非法或保留位非 0 抛 InputEventError。编码与解码在成功路径上零分配
  * （解码可写入调用方提供的对象）。
  */
 
-import { INPUT_KIND, type InputEvent, type InputKind } from './api';
+import { INPUT_KIND, NEG_ZERO_HINT, type InputEvent, type InputKind } from './api';
 
 /** 一条 InputEvent 的字节数。 */
 export const INPUT_EVENT_BYTES = 16;
@@ -54,8 +55,14 @@ export class InputEventError extends Error {
   }
 }
 
+/** [lo, hi] 内的整数，且不是 −0（−0 编码读回成 +0，见 NEG_ZERO_HINT）。 */
 function isInt(v: number, lo: number, hi: number): boolean {
-  return typeof v === 'number' && Math.floor(v) === v && v >= lo && v <= hi;
+  return typeof v === 'number' && Math.floor(v) === v && v >= lo && v <= hi && !Object.is(v, -0);
+}
+
+/** 错误信息里显示字段值：String(−0) 是 "0"，所以 −0 显式写出并附 NEG_ZERO_HINT。只在失败路径调用。 */
+function show(v: unknown): string {
+  return Object.is(v, -0) ? `−0（${NEG_ZERO_HINT}）` : String(v);
 }
 
 /** kind 是否为已定义的 INPUT_KIND（1..4）。 */
@@ -66,21 +73,21 @@ export function isInputKind(k: number): k is InputKind {
 /** 逐字段检查；合法返回 null，否则返回第一条中文错误。成功路径不分配。 */
 export function validateInputEvent(ev: InputEvent): string | null {
   if (ev === null || typeof ev !== 'object') return `InputEvent 必须是对象：${String(ev)}`;
-  if (!isInt(ev.tick, 0, U32_MAX)) return `InputEvent.tick 必须是 0..4294967295 的整数：${String(ev.tick)}`;
-  if (!isInt(ev.offMs, I8_MIN, I8_MAX)) return `InputEvent.offMs 必须是 −128..127 的整数：${String(ev.offMs)}`;
-  if (ev.player !== 0 && ev.player !== 1) return `InputEvent.player 只能是 0 或 1：${String(ev.player)}`;
-  if (!isInputKind(ev.kind)) return `InputEvent.kind 非法：${String(ev.kind)}（只许 1 DOWN、2 RELEASE、3 PREMOVE、4 CANCEL）`;
-  if (!isInt(ev.tx, I16_MIN, I16_MAX)) return `InputEvent.tx 必须是 i16 整数（厘米）：${String(ev.tx)}`;
-  if (!isInt(ev.tz, I16_MIN, I16_MAX)) return `InputEvent.tz 必须是 i16 整数（厘米）：${String(ev.tz)}`;
-  if (!isInt(ev.dx, I16_MIN, I16_MAX)) return `InputEvent.dx 必须是 i16 整数（‰屏宽）：${String(ev.dx)}`;
-  if (!isInt(ev.dy, I16_MIN, I16_MAX)) return `InputEvent.dy 必须是 i16 整数（‰屏宽）：${String(ev.dy)}`;
-  if (!isInt(ev.durMs, 0, U16_MAX)) return `InputEvent.durMs 必须是 0..65535 的整数：${String(ev.durMs)}`;
+  if (!isInt(ev.tick, 0, U32_MAX)) return `InputEvent.tick 必须是 0..4294967295 的整数：${show(ev.tick)}`;
+  if (!isInt(ev.offMs, I8_MIN, I8_MAX)) return `InputEvent.offMs 必须是 −128..127 的整数：${show(ev.offMs)}`;
+  if ((ev.player !== 0 && ev.player !== 1) || Object.is(ev.player, -0)) return `InputEvent.player 只能是 0 或 1：${show(ev.player)}`;
+  if (!isInputKind(ev.kind)) return `InputEvent.kind 非法：${show(ev.kind)}（只许 1 DOWN、2 RELEASE、3 PREMOVE、4 CANCEL）`;
+  if (!isInt(ev.tx, I16_MIN, I16_MAX)) return `InputEvent.tx 必须是 i16 整数（厘米）：${show(ev.tx)}`;
+  if (!isInt(ev.tz, I16_MIN, I16_MAX)) return `InputEvent.tz 必须是 i16 整数（厘米）：${show(ev.tz)}`;
+  if (!isInt(ev.dx, I16_MIN, I16_MAX)) return `InputEvent.dx 必须是 i16 整数（‰屏宽）：${show(ev.dx)}`;
+  if (!isInt(ev.dy, I16_MIN, I16_MAX)) return `InputEvent.dy 必须是 i16 整数（‰屏宽）：${show(ev.dy)}`;
+  if (!isInt(ev.durMs, 0, U16_MAX)) return `InputEvent.durMs 必须是 0..65535 的整数：${show(ev.durMs)}`;
   return null;
 }
 
 function checkSpan(view: DataView, off: number, what: string): void {
   if (!isInt(off, 0, U32_MAX) || off + INPUT_EVENT_BYTES > view.byteLength) {
-    throw new RangeError(`${what}：偏移 ${String(off)} 起放不下 ${INPUT_EVENT_BYTES} 字节（视图长度 ${view.byteLength}）`);
+    throw new RangeError(`${what}：偏移 ${show(off)} 起放不下 ${INPUT_EVENT_BYTES} 字节（视图长度 ${view.byteLength}）`);
   }
 }
 

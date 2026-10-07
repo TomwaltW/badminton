@@ -13,7 +13,10 @@
  *
  * 字段顺序即 2.3 节接口的书写顺序；只许在末尾追加（追加即 bump 契约版本）。
  * 装备与属性只作用于 α、散布、跑速、体力上限四项（不碰 v0 与 v_t，查表不受影响）。
+ * 所有字段都不许 −0（经 Int32Array 读回成 +0，见 api.ts 的 NEG_ZERO_HINT）：validateMatchCfg 报错，encodeMatchCfg 抛错。
  */
+
+import { NEG_ZERO_HINT } from './api';
 
 /** 分制（计划 2.3；方案 §2.1）。0 保留为非法。 */
 export const RULES_ID = {
@@ -130,12 +133,23 @@ export function defaultMatchCfg(seed: number): MatchCfg {
   };
 }
 
+/** [lo, hi] 内的整数，且不是 −0（−0 经 Int32Array 读回成 +0，见 NEG_ZERO_HINT）。 */
 function isInt(v: number, lo: number, hi: number): boolean {
-  return typeof v === 'number' && Math.floor(v) === v && v >= lo && v <= hi;
+  return typeof v === 'number' && Math.floor(v) === v && v >= lo && v <= hi && !Object.is(v, -0);
+}
+
+/** 只取 0 / 1 的开关字段；−0 不算 0。 */
+function isBit(v: number): boolean {
+  return (v === 0 || v === 1) && !Object.is(v, -0);
+}
+
+/** 错误信息里显示字段值：String(−0) 是 "0"，所以 −0 显式写出并附 NEG_ZERO_HINT。只在失败路径调用。 */
+function show(v: unknown): string {
+  return Object.is(v, -0) ? `−0（${NEG_ZERO_HINT}）` : String(v);
 }
 
 function checkI32(v: number, name: string): void {
-  if (!isInt(v, I32_MIN, I32_MAX)) throw new RangeError(`MatchCfg.${name} 必须是 int32 范围内的整数，实际为 ${String(v)}`);
+  if (!isInt(v, I32_MIN, I32_MAX)) throw new RangeError(`MatchCfg.${name} 必须是 int32 范围内的整数，实际为 ${show(v)}`);
 }
 
 /** 检查球员 p 的 8 个字段都能无损存进 int32；成功路径不分配（名字都是常量串）。 */
@@ -153,7 +167,7 @@ function checkPlayerI32(pc: PlayerCfg): void {
 
 function checkRange(arr: Int32Array, off: number, what: string): void {
   if (!isInt(off, 0, I32_MAX) || off + MATCH_CFG_I32_LEN > arr.length) {
-    throw new RangeError(`${what}：偏移 ${String(off)} 起放不下 ${MATCH_CFG_I32_LEN} 个 int32（数组长度 ${arr.length}）`);
+    throw new RangeError(`${what}：偏移 ${show(off)} 起放不下 ${MATCH_CFG_I32_LEN} 个 int32（数组长度 ${arr.length}）`);
   }
 }
 
@@ -166,7 +180,7 @@ function checkRange(arr: Int32Array, off: number, what: string): void {
 export function encodeMatchCfg(cfg: MatchCfg, dst: Int32Array, off: number): void {
   checkRange(dst, off, 'encodeMatchCfg');
   if (!isInt(cfg.seed, I32_MIN, U32_MAX)) {
-    throw new RangeError(`MatchCfg.seed 必须是 u32（或 i32 位模式）整数，实际为 ${String(cfg.seed)}`);
+    throw new RangeError(`MatchCfg.seed 必须是 u32（或 i32 位模式）整数，实际为 ${show(cfg.seed)}`);
   }
   if (cfg.players === undefined || cfg.players === null || cfg.players.length !== 2) {
     throw new RangeError('MatchCfg.players 必须恰好 2 名球员');
@@ -244,7 +258,7 @@ function isKnownRulesId(v: number): boolean {
  * 业务校验；返回中文错误列表，合法时为空数组。
  * 规则：rulesId 已知；seed 为 u32；venueId、abGroup 为非负 int32；开关只取 0/1；
  * 排位赛（RANKED11）强制 ddaEnabled = 0；kind 只取 0/1；人 aiLevel = 0、AI 为 1..10；
- * 五项 permille 为 1..5000 的整数；inputOffsetMs 为 −150..150 的整数。
+ * 五项 permille 为 1..5000 的整数；inputOffsetMs 为 −150..150 的整数；任何字段取 −0 都不合法（NEG_ZERO_HINT）。
  */
 export function validateMatchCfg(cfg: MatchCfg): string[] {
   const errs: string[] = [];
@@ -253,16 +267,14 @@ export function validateMatchCfg(cfg: MatchCfg): string[] {
     return errs;
   }
   if (!isInt(cfg.rulesId, I32_MIN, I32_MAX) || !isKnownRulesId(cfg.rulesId)) {
-    errs.push(`rulesId 未知：${String(cfg.rulesId)}（只许 1 QUICK7、2 RANKED11、3 INTL15、4 TUTORIAL5）`);
+    errs.push(`rulesId 未知：${show(cfg.rulesId)}（只许 1 QUICK7、2 RANKED11、3 INTL15、4 TUTORIAL5）`);
   }
-  if (!isInt(cfg.seed, 0, U32_MAX)) errs.push(`seed 必须是 0..4294967295 的整数：${String(cfg.seed)}`);
-  if (!isInt(cfg.venueId, 0, I32_MAX)) errs.push(`venueId 必须是非负 int32 整数：${String(cfg.venueId)}`);
-  if (cfg.ddaEnabled !== 0 && cfg.ddaEnabled !== 1) errs.push(`ddaEnabled 只能是 0 或 1：${String(cfg.ddaEnabled)}`);
-  if (cfg.staminaEnabled !== 0 && cfg.staminaEnabled !== 1) {
-    errs.push(`staminaEnabled 只能是 0 或 1：${String(cfg.staminaEnabled)}`);
-  }
+  if (!isInt(cfg.seed, 0, U32_MAX)) errs.push(`seed 必须是 0..4294967295 的整数：${show(cfg.seed)}`);
+  if (!isInt(cfg.venueId, 0, I32_MAX)) errs.push(`venueId 必须是非负 int32 整数：${show(cfg.venueId)}`);
+  if (!isBit(cfg.ddaEnabled)) errs.push(`ddaEnabled 只能是 0 或 1：${show(cfg.ddaEnabled)}`);
+  if (!isBit(cfg.staminaEnabled)) errs.push(`staminaEnabled 只能是 0 或 1：${show(cfg.staminaEnabled)}`);
   if (cfg.rulesId === RULES_ID.RANKED11 && cfg.ddaEnabled !== 0) errs.push('排位赛（RANKED11）必须关闭动态难度：ddaEnabled 应为 0');
-  if (!isInt(cfg.abGroup, 0, I32_MAX)) errs.push(`abGroup 必须是非负 int32 整数：${String(cfg.abGroup)}`);
+  if (!isInt(cfg.abGroup, 0, I32_MAX)) errs.push(`abGroup 必须是非负 int32 整数：${show(cfg.abGroup)}`);
   if (!Array.isArray(cfg.players) || cfg.players.length !== 2) {
     errs.push('players 必须恰好 2 名球员');
     return errs;
@@ -274,20 +286,20 @@ export function validateMatchCfg(cfg: MatchCfg): string[] {
       errs.push(`${who} 缺失`);
       continue;
     }
-    if (pc.kind !== PLAYER_KIND.HUMAN && pc.kind !== PLAYER_KIND.AI) {
-      errs.push(`${who}.kind 只能是 0（人）或 1（AI）：${String(pc.kind)}`);
-    } else if (pc.kind === PLAYER_KIND.HUMAN && pc.aiLevel !== 0) {
-      errs.push(`${who} 是人，aiLevel 必须为 0：${String(pc.aiLevel)}`);
+    if (!isBit(pc.kind)) {
+      errs.push(`${who}.kind 只能是 0（人）或 1（AI）：${show(pc.kind)}`);
+    } else if (pc.kind === PLAYER_KIND.HUMAN && !isInt(pc.aiLevel, 0, 0)) {
+      errs.push(`${who} 是人，aiLevel 必须为 0：${show(pc.aiLevel)}`);
     } else if (pc.kind === PLAYER_KIND.AI && !isInt(pc.aiLevel, AI_LEVEL_MIN, AI_LEVEL_MAX)) {
-      errs.push(`${who} 是 AI，aiLevel 必须是 ${AI_LEVEL_MIN}..${AI_LEVEL_MAX} 的整数：${String(pc.aiLevel)}`);
+      errs.push(`${who} 是 AI，aiLevel 必须是 ${AI_LEVEL_MIN}..${AI_LEVEL_MAX} 的整数：${show(pc.aiLevel)}`);
     }
     for (const f of PERMILLE_FIELDS) {
       if (!isInt(pc[f], PERMILLE_MIN, PERMILLE_MAX)) {
-        errs.push(`${who}.${f} 必须是 ${PERMILLE_MIN}..${PERMILLE_MAX} 的整数（‰）：${String(pc[f])}`);
+        errs.push(`${who}.${f} 必须是 ${PERMILLE_MIN}..${PERMILLE_MAX} 的整数（‰）：${show(pc[f])}`);
       }
     }
     if (!isInt(pc.inputOffsetMs, PLAYER_INPUT_OFFSET_MS_MIN, PLAYER_INPUT_OFFSET_MS_MAX)) {
-      errs.push(`${who}.inputOffsetMs 必须是 ${PLAYER_INPUT_OFFSET_MS_MIN}..${PLAYER_INPUT_OFFSET_MS_MAX} 的整数（ms）：${String(pc.inputOffsetMs)}`);
+      errs.push(`${who}.inputOffsetMs 必须是 ${PLAYER_INPUT_OFFSET_MS_MIN}..${PLAYER_INPUT_OFFSET_MS_MAX} 的整数（ms）：${show(pc.inputOffsetMs)}`);
     }
   }
   return errs;

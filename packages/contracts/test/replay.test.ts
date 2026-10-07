@@ -384,6 +384,29 @@ describe('编码拒绝非法回放', () => {
     expectReplayError(() => encodeReplay(r2), 'field', /第 3 条输入/);
   });
 
+  test('含 −0 的回放：encode 抛 ReplayError(field) 并提示 |0 归一；归一后 decode(encode(r)) 等于 r', () => {
+    // 回归：输入 offMs、MatchCfg、哈希、比分里的 −0 曾能过校验，往返后成 +0，toEqual(r) 失败。
+    const negZero = Math.round(-0.3);
+    const cases: [string, (r: Replay) => void, RegExp][] = [
+      ['输入 offMs', (r) => (r.inputs[0]!.offMs = negZero), /offMs/],
+      ['输入 player', (r) => (r.inputs[0]!.player = negZero as 0), /player/],
+      ['MatchCfg inputOffsetMs', (r) => (r.cfg.players[0].inputOffsetMs = negZero), /inputOffsetMs/],
+      ['哈希', (r) => (r.hashes[0] = negZero), /哈希/],
+      ['比分', (r) => (r.games[0]![1] = negZero), /比分/],
+      ['contentHash', (r) => (r.contentHash = negZero), /contentHash/],
+    ];
+    for (const [name, mutate, re] of cases) {
+      const r = structuredClone(fixtureJson);
+      mutate(r);
+      expect([name, validateReplay(r)]).toEqual([name, expect.stringMatching(re)]);
+      expectReplayError(() => encodeReplay(r), 'field', /−0 不合法：量化结果请 \|0 归一/);
+    }
+    const r = structuredClone(fixtureJson);
+    r.inputs[0]!.offMs = negZero | 0;
+    r.hashes[0] = negZero >>> 0;
+    expect(decodeReplay(encodeReplay(r))).toEqual(r);
+  });
+
   test('两名都是人时，两名球员的输入都可以存', () => {
     const r = structuredClone(fixtureJson);
     r.cfg.players[1] = defaultPlayerCfg(PLAYER_KIND.HUMAN);

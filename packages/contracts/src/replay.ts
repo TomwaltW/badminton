@@ -27,10 +27,11 @@
  * 11 分排位约 3–4 分钟 → 哈希 ≈ 1 KB、输入 ≈ 3.5 KB，合计约 4.5–5 KB。与计划"一局约 4–5 KB"一致。
  *
  * 解码先检查魔数、版本与结构长度，再核对尾部校验，最后做字段校验；任何一步失败抛 ReplayError（中文信息）。
+ * 所有整数字段（含输入与 MatchCfg）取 −0 都不合法（读回成 +0，往返不再相等；见 api.ts 的 NEG_ZERO_HINT），编码抛错。
  * 本文件自带逐字节 FNV-1a，不依赖 packages/sim。
  */
 
-import type { InputEvent } from './api';
+import { NEG_ZERO_HINT, type InputEvent } from './api';
 import { INPUT_EVENT_BYTES, InputEventError, decodeInputEvent, encodeInputEvent, validateInputEvent } from './input-event';
 import { MATCH_CFG_I32_LEN, PLAYER_KIND, decodeMatchCfg, encodeMatchCfg, validateMatchCfg, type MatchCfg } from './match-cfg';
 
@@ -106,23 +107,29 @@ export function replayHashCount(totalTicks: number): number {
   return Math.floor(totalTicks / REPLAY_HASH_EVERY_TICKS);
 }
 
+/** [lo, hi] 内的整数，且不是 −0（−0 编码读回成 +0，见 NEG_ZERO_HINT）。 */
 function isInt(v: number, lo: number, hi: number): boolean {
-  return typeof v === 'number' && Math.floor(v) === v && v >= lo && v <= hi;
+  return typeof v === 'number' && Math.floor(v) === v && v >= lo && v <= hi && !Object.is(v, -0);
+}
+
+/** 错误信息里显示字段值：String(−0) 是 "0"，所以 −0 显式写出并附 NEG_ZERO_HINT。只在失败路径调用。 */
+function show(v: unknown): string {
+  return Object.is(v, -0) ? `−0（${NEG_ZERO_HINT}）` : String(v);
 }
 
 /**
  * 回放内容的字段校验（编码前与解码后共用）；合法返回 null，否则返回第一条中文错误。
  * 规则：三个哈希为 u32；MatchCfg 合法；输入合法、只属于人、tick 单调不减且 < totalTicks；
- * hashes 长度 = ⌊totalTicks / 30⌋ 且每个为 u32；局数 ≤ 255、每局比分为 u16。
+ * hashes 长度 = ⌊totalTicks / 30⌋ 且每个为 u32；局数 ≤ 255、每局比分为 u16；任何整数取 −0 都不合法。
  */
 export function validateReplay(r: Replay): string | null {
   if (r === null || typeof r !== 'object') return `回放必须是对象：${String(r)}`;
-  if (!isInt(r.simVer, 0, U32_MAX)) return `simVer 必须是 u32：${String(r.simVer)}`;
-  if (!isInt(r.contentHash, 0, U32_MAX)) return `contentHash 必须是 u32：${String(r.contentHash)}`;
-  if (!isInt(r.tablesHash, 0, U32_MAX)) return `tablesHash 必须是 u32：${String(r.tablesHash)}`;
+  if (!isInt(r.simVer, 0, U32_MAX)) return `simVer 必须是 u32：${show(r.simVer)}`;
+  if (!isInt(r.contentHash, 0, U32_MAX)) return `contentHash 必须是 u32：${show(r.contentHash)}`;
+  if (!isInt(r.tablesHash, 0, U32_MAX)) return `tablesHash 必须是 u32：${show(r.tablesHash)}`;
   const cfgErrs = validateMatchCfg(r.cfg);
   if (cfgErrs.length > 0) return `MatchCfg 不合法：${cfgErrs.join('；')}`;
-  if (!isInt(r.totalTicks, 0, U32_MAX)) return `totalTicks 必须是 u32：${String(r.totalTicks)}`;
+  if (!isInt(r.totalTicks, 0, U32_MAX)) return `totalTicks 必须是 u32：${show(r.totalTicks)}`;
   if (!Array.isArray(r.inputs)) return 'inputs 必须是数组';
   let lastTick = 0;
   for (let i = 0; i < r.inputs.length; i++) {
@@ -142,14 +149,15 @@ export function validateReplay(r: Replay): string | null {
     return `哈希个数应为 ⌊totalTicks / ${REPLAY_HASH_EVERY_TICKS}⌋ = ${want}，实际为 ${r.hashes.length}`;
   }
   for (let i = 0; i < r.hashes.length; i++) {
-    if (!isInt(r.hashes[i], 0, U32_MAX)) return `第 ${i} 个哈希必须是 u32：${String(r.hashes[i])}`;
+    if (!isInt(r.hashes[i], 0, U32_MAX)) return `第 ${i} 个哈希必须是 u32：${show(r.hashes[i])}`;
   }
   if (!Array.isArray(r.games)) return 'games 必须是数组';
   if (r.games.length > REPLAY_MAX_GAMES) return `局数超过 ${REPLAY_MAX_GAMES}：${r.games.length}`;
   for (let i = 0; i < r.games.length; i++) {
     const g = r.games[i];
     if (!Array.isArray(g) || g.length !== 2 || !isInt(g[0], 0, U16_MAX) || !isInt(g[1], 0, U16_MAX)) {
-      return `第 ${i} 局比分必须是两个 0..65535 的整数：${String(g)}`;
+      const v = Array.isArray(g) && g.length === 2 ? `${show(g[0])},${show(g[1])}` : String(g);
+      return `第 ${i} 局比分必须是两个 0..65535 的整数：${v}`;
     }
   }
   return null;

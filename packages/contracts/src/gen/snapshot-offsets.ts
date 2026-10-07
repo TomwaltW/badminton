@@ -24,7 +24,7 @@ export const SNAP_I32_MAGIC_LEN = 1;
 export const SNAP_I32_SCHEMA_VER = 1;
 export const SNAP_I32_SCHEMA_VER_LEN = 1;
 
-/** simVer：dist/sim.js 字节的 FNV-1a（u32 按位存）；1 槽 */
+/** simVer：dist/sim.js 字节的 FNV-1a（u32 按位存）。待 10-11 审定：sim 无从得知自身 simVer，由谁写入、hash() 是否计入未定（方案见 snapshot.schema.ts 本字段旁注释）；1 槽 */
 export const SNAP_I32_SIM_VER = 2;
 export const SNAP_I32_SIM_VER_LEN = 1;
 
@@ -145,11 +145,11 @@ export const SNAP_F64_P0_FOCUS_LEN = 1;
 export const SNAP_F64_P1_FOCUS = 31;
 export const SNAP_F64_P1_FOCUS_LEN = 1;
 
-/** 球员 0：最近 8 个 tick 的位置环：槽 s 的 x, y, z 在 3s .. 3s+2；最新槽号见 I32 POS_RING_HEAD；24 槽 */
+/** 球员 0：最近 8 个 tick 的位置环：槽 s 的 x, y, z 在 3s .. 3s+2；最新槽号见 I32 POS_RING_HEAD（环长待 10-11 审定，见 POS_RING_LEN 注释）；24 槽 */
 export const SNAP_F64_P0_POS_RING = 32;
 export const SNAP_F64_P0_POS_RING_LEN = 24;
 
-/** 球员 1：最近 8 个 tick 的位置环：槽 s 的 x, y, z 在 3s .. 3s+2；最新槽号见 I32 POS_RING_HEAD；24 槽 */
+/** 球员 1：最近 8 个 tick 的位置环：槽 s 的 x, y, z 在 3s .. 3s+2；最新槽号见 I32 POS_RING_HEAD（环长待 10-11 审定，见 POS_RING_LEN 注释）；24 槽 */
 export const SNAP_F64_P1_POS_RING = 56;
 export const SNAP_F64_P1_POS_RING_LEN = 24;
 

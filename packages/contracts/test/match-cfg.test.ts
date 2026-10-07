@@ -268,6 +268,47 @@ describe('validateMatchCfg', () => {
     }
   });
 
+  test('−0 不合法：每个整数字段 validate 报"|0 归一"，encodeMatchCfg 抛 RangeError 且 dst 不改', () => {
+    // 回归：inputOffsetMs、ddaEnabled、人的 kind / aiLevel 等取 −0 曾能过校验，经 Int32Array 读回却成 +0。
+    const negZero = Math.round(-0.3);
+    const top = ['rulesId', 'seed', 'venueId', 'ddaEnabled', 'staminaEnabled', 'abGroup'] as const;
+    const per = [
+      'kind',
+      'aiLevel',
+      'windowScalePermille',
+      'alphaScalePermille',
+      'scatterScalePermille',
+      'runSpeedPermille',
+      'staminaMaxPermille',
+      'inputOffsetMs',
+    ] as const;
+    const paths: [string, (c: MatchCfg) => void][] = [
+      ...top.map((f): [string, (c: MatchCfg) => void] => [f, (c) => ((c as unknown as Record<string, number>)[f] = negZero)]),
+      ...per.map((f): [string, (c: MatchCfg) => void] => [
+        `players[0].${f}`,
+        (c) => ((c.players[0] as unknown as Record<string, number>)[f] = negZero),
+      ]),
+      ['players[1].inputOffsetMs', (c) => (c.players[1].inputOffsetMs = negZero)],
+    ];
+    for (const [path, mutate] of paths) {
+      const c = defaultMatchCfg(42);
+      mutate(c);
+      const errs = validateMatchCfg(c);
+      const field = path.slice(path.lastIndexOf('.') + 1);
+      expect([path, errs.some((e) => e.includes(field) && /−0 不合法：量化结果请 \|0 归一/.test(e))]).toEqual([path, true]);
+      const a = new Int32Array(MATCH_CFG_I32_LEN + 2).fill(-7);
+      expect(() => encodeMatchCfg(c, a, 1)).toThrow(RangeError);
+      expect(() => encodeMatchCfg(c, a, 1)).toThrow(/−0 不合法/);
+      expect([path, Array.from(a).every((x) => x === -7)]).toEqual([path, true]);
+    }
+    const ok = defaultMatchCfg(42);
+    ok.players[0].inputOffsetMs = negZero | 0;
+    expect(validateMatchCfg(ok)).toEqual([]);
+    const a = new Int32Array(MATCH_CFG_I32_LEN);
+    encodeMatchCfg(ok, a, 0);
+    expect(decodeMatchCfg(a, 0)).toEqual(ok);
+  });
+
   test('不是对象 / 球员缺失时返回中文错误而不是抛 TypeError', () => {
     for (const bad of [null, undefined, 42, 'cfg']) {
       const errs = validateMatchCfg(bad as unknown as MatchCfg);

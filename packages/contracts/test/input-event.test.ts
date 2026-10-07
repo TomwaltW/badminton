@@ -178,6 +178,26 @@ describe('越界与非法字段', () => {
     }
   });
 
+  test('−0 不合法：每个整数字段（含 player）validate 报"|0 归一"、编码抛 RangeError；|0 归一后往返仍相等', () => {
+    // 回归：Math.round(−0.3) = −0 曾能过校验，编码读回却成 +0：实时局拿原对象、回放 / P2 拿解码对象，
+    // 对符号零敏感的计算（1/x、Math.sign、min/max 的零）会分歧。
+    const negZero = Math.round(-0.3);
+    expect(Object.is(negZero, -0)).toBe(true);
+    for (const f of ['tick', 'offMs', 'player', 'tx', 'tz', 'dx', 'dy', 'durMs'] as const) {
+      const e = ev();
+      (e as unknown as Record<string, number>)[f] = negZero;
+      const msg = validateInputEvent(e);
+      expect([f, msg]).toEqual([f, expect.stringContaining(`InputEvent.${f}`)]);
+      expect(msg!).toMatch(/−0 不合法：量化结果请 \|0 归一/);
+      const buf = new Uint8Array(INPUT_EVENT_BYTES).fill(0x5a);
+      expect(() => encodeInputEvent(e, new DataView(buf.buffer), 0)).toThrow(RangeError);
+      expect(buf.every((b) => b === 0x5a)).toBe(true);
+    }
+    const ok = ev({ offMs: negZero | 0 });
+    expect(validateInputEvent(ok)).toBeNull();
+    expect(decodeInputEvent(new DataView(encode(ok).buffer), 0)).toEqual(ok);
+  });
+
   test('解码：kind 为 0 或未定义值抛 InputEventError', () => {
     for (const b5 of [0x00, 0x05, 0x0f, 0x80, 0x8f]) {
       const buf = encode(ev());

@@ -20,6 +20,16 @@ export const U_PER_MS = 30;
 /** 每秒的 u 数 = SIM_HZ × U_PER_TICK = U_PER_MS × 1000 = 30000。 */
 export const U_PER_SECOND = SIM_HZ * U_PER_TICK;
 
+// ---- 整数字段与 −0 ----
+
+/**
+ * 契约里的整数字段（InputEvent、MatchCfg / PlayerCfg、BMRP 回放头与尾）一律不许 −0：
+ * 编码成定宽整数再读回就成了 +0，实时局拿原对象、回放 / P2 拿解码对象，对符号零敏感的计算
+ * （1/x、Math.sign、min/max 的零）会分歧。量化处请用 `x | 0` 归一（如 Math.round(−0.3) | 0 = 0）。
+ * 各 validate 遇到 −0 时在错误信息里带上这句，encode 随之抛错。
+ */
+export const NEG_ZERO_HINT = '−0 不合法：量化结果请 |0 归一';
+
 // ---- 输入（计划 2.3、2.4） ----
 
 /**
@@ -304,7 +314,13 @@ export interface Sim {
   save(dst: Snapshot): void;
   /** 从 src 恢复完整状态，并重建派生缓存。 */
   load(src: Snapshot): void;
-  /** FNV-1a over i32 + f64 位：等于对 save() 写出的快照先混 i32 全部、再混 f64 全部（u32）。 */
+  /**
+   * FNV-1a over i32 + f64 位：等于对 save() 写出的快照先混 i32 全部、再混 f64 全部（u32）。
+   *
+   * 待 10-11 审定：这个定义包含 I32 头的 SIM_VER 槽，可 sim.js 无法知道自身字节的 FNV，CreateSim 也不接收 simVer
+   * （方案见 snapshot.schema.ts 里 SIM_VER 旁的注释：CreateSim 加 simVer 参数 / 宿主在 save 后补写且 hash 不计入 /
+   * 从快照删去只留在 BMRP 头）。hash() 是否应跳过整个身份头（MAGIC .. CONTENT_HASH）同样待审定。
+   */
   hash(): number;
   /** 按先后取出 out 放得下的事件（打包格式见 SIM_EVENT_STRIDE），返回条数；放不下的留在队列里下次再取。 */
   drainEvents(out: Int32Array): number;
@@ -314,5 +330,12 @@ export interface Sim {
   readonly view: Float64Array;
 }
 
-/** 由 packages/sim 实现；契约里只有类型。 */
+/**
+ * 由 packages/sim 实现；契约里只有类型。
+ *
+ * 待 10-11 审定：目前不接收 simVer，sim 便无从填写快照 I32 头的 SIM_VER 槽（simVer = dist/sim.js 字节的 FNV，
+ * 只在构建产物 dist/sim.version 里），而 Sim.hash() 的定义包含这一槽。可选方案：(a) 在这里加 simVer 参数，
+ * 宿主读 sim.version 后传入；(b) 宿主在 save 之后补写该槽，hash() 不计入；(c) 从快照删去该槽，只留在 BMRP 头。
+ * 详见 snapshot.schema.ts 里 SIM_VER 旁的注释。
+ */
 export type CreateSim = (cfg: MatchCfg, content: ContentBundle, tables: ShotTables) => Sim;
