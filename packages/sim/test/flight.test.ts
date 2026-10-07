@@ -32,6 +32,10 @@ import {
   stepSubstep,
 } from '../src/flight';
 import { CROSS_DOWN, NO_CROSS, crossSubstep } from '../src/events';
+import * as contractsApi from '../../contracts/src/api';
+
+/** 编译期：T 是否为 any。 */
+type IsAny<T> = 0 extends 1 & T ? true : false;
 
 const ALPHAS = [0.4, 0.6, 0.8, 1.0, 1.2, 1.3, 1.5];
 
@@ -90,6 +94,19 @@ describe('常数', () => {
     expect(FL_STRIDE).toBe(8);
     expect(FL_KINEMATIC).toBe(6);
     expect([FL_PX, FL_PY, FL_PZ, FL_VX, FL_VY, FL_VZ, FL_G, FL_K]).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+  });
+
+  test('SIM_HZ、U_PER_TICK 以契约 api.ts 为单一事实来源；U_PER_SUBSTEP = U_PER_TICK / SUBSTEPS_PER_TICK', () => {
+    expect(SIM_HZ).toBe(contractsApi.SIM_HZ);
+    expect(U_PER_TICK).toBe(contractsApi.U_PER_TICK);
+    expect(U_PER_SUBSTEP).toBe(U_PER_TICK / SUBSTEPS_PER_TICK);
+    // 编译期（tsc -b）：tests 经工程引用看到的是 .tsbuild 里 flight 的 d.ts；若其中对契约的相对导入解析不到，
+    // 这两个常量会被 skipLibCheck 掩盖而静默退化成 any。这里要求它们仍是契约里的字面量类型。
+    const hzIsAny: IsAny<typeof SIM_HZ> = false;
+    const uIsAny: IsAny<typeof U_PER_TICK> = false;
+    const hz: 30 = SIM_HZ;
+    const u: 1000 = U_PER_TICK;
+    expect([hzIsAny, uIsAny, hz, u]).toEqual([false, false, 30, 1000]);
   });
 
   test('dragFromTerminal(G, v_t) = K_STD ≈ 0.232', () => {

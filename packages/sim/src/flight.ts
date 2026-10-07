@@ -11,6 +11,7 @@
  * 坐标：x 沿球场纵向（向前），y 向上，z 侧向。
  */
 
+import { SIM_HZ, U_PER_TICK } from '../../contracts/src/api';
 import type { SqrtFn } from './math';
 
 /** 飞行状态布局：位置、速度、缩放后的重力 g′、阻力系数 k。 */
@@ -33,11 +34,13 @@ export const VT_STD = 6.5;
 /** k = g / v_t²（约 0.232 m⁻¹）。 */
 export const K_STD = G_STD / (VT_STD * VT_STD);
 
-/** 时间单位：1u = 1/30000 s（契约 api.ts 的 U_PER_TICK = 1000，SIM_HZ = 30）。 */
-export const SIM_HZ = 30;
-export const U_PER_TICK = 1000;
+/**
+ * 时间单位：1u = 1/30000 s，SIM_HZ = 30、U_PER_TICK = 1000。单一事实来源是契约
+ * packages/contracts/src/api.ts（esbuild 把用到的常量打进 sim.js）；这里转出，保持 api.flight 的形状不变。
+ */
+export { SIM_HZ, U_PER_TICK };
 export const SUBSTEPS_PER_TICK = 2;
-/** 一个子步 = 1/60 s = 500u。 */
+/** 一个子步 = 1/60 s = 500u（= U_PER_TICK / SUBSTEPS_PER_TICK，测试断言两者相等）。 */
 export const U_PER_SUBSTEP = 500;
 /** 子步长 1/60 s。 */
 export const SUBSTEP_DT = 1 / 60;

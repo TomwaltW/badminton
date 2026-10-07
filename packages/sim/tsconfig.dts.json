@@ -1,5 +1,6 @@
 {
   "//": "仅供 tools/sim/build.ts 生成单文件 dist/sim.d.ts（声明全局 BadmintonSim）；不参与 tsc -b。",
+  "//rootDir": "rootDir 放宽到 packages：sim 以相对路径引用的契约源码（packages/contracts/src）一并编进单文件 d.ts（references 不随 extends 继承，这里也不需要）。tsc 输出的模块名因此是 sim/src/<x> 与 contracts/src/<x>，build.ts 改名为 badminton-sim/<x> 与 badminton-sim/contracts/<x>。",
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "composite": false,
@@ -10,7 +11,7 @@
     "moduleResolution": "node10",
     "verbatimModuleSyntax": false,
     "isolatedModules": false,
-    "rootDir": "src",
+    "rootDir": "..",
     "outFile": "dist/sim.d.ts",
     "tsBuildInfoFile": null
   },
