@@ -15,6 +15,7 @@
     "sim:scan": "bun tools/sim/scan.ts",
     "wx-selftest:sync": "bun tools/sim/sync-wx-selftest.ts",
     "contracts:gen": "bun packages/contracts/scripts/gen-snapshot-offsets.ts",
+    "contracts:fixtures": "bun packages/contracts/scripts/gen-fixtures.ts",
     "typecheck": "tsc -b",
     "lint": "eslint ."
   },
